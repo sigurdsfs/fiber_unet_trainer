@@ -1,0 +1,130 @@
+# Recommended MicroNet recipe bundling the performance improvements documented in
+# IMPROVEMENTS.md. Kept separate from unet_resnet50.yaml (which maps to an older
+# checkpoint trained WITHOUT imagenet normalization) so the two never mismatch.
+#
+# Train:   python -m fiberseg.train --config configs/micronet/unet_resnet50_improved.yaml
+# After training, tune the threshold on validation (no retrain) and set it below:
+#   python -m fiberseg.tools.tune_threshold --config <this> --checkpoint <best.ckpt>
+
+mlflow:
+  tracking_uri: "http://127.0.0.1:5000"
+  experiment_name: "fiber-sem-micronet-improved"
+  run_name: null
+
+data:
+  images_dir: "d:/H3 Asbest/Current Training Material - fibers only - Preproc/Clean Subset/Images"
+  masks_dir: "d:/H3 Asbest/Current Training Material - fibers only - Preproc/Clean Subset/Masks"
+  image_glob: "*.tif"
+  mask_pattern: "{stem}_mask.tif"
+  image_channels: 3
+  # Standardize inputs the way the pretrained MicroNet encoder expects (item 1).
+  image_normalization: "imagenet"
+  patch_size: 512
+  stride: 256
+  batch_size: 8
+  num_workers: 4
+  seed: 42
+  split:
+    train: 0.7
+    val: 0.15
+    test: 0.15
+  min_foreground_fraction: 0.001
+  keep_empty_probability: 0.2
+
+  # Tile selection. "static" (default) uses the fixed pre-filtered set above.
+  # Switch to "weighted" to instead keep all tiles and resample each epoch (all
+  # positives + a fresh negative draw), optionally mining hard negatives. Change
+  # ONLY this block to A/B the two grouping strategies with everything else equal.
+  tile_sampling: "static"        # or "weighted"
+  negative_ratio: 1.0            # weighted: negatives per positive per epoch
+  hard_negative_fraction: 0.0    # weighted: 0 = random negatives, up to 1 = hardest
+  hard_negative_warmup_epochs: 3 # weighted: random-only epochs before hard mining
+
+model:
+  architecture: "Unet"
+  encoder_name: "resnet50"
+  encoder_weights: "micronet"
+  in_channels: 3
+  classes: 1
+
+train:
+  max_epochs: 400
+  early_stopping:
+    patience: 15
+    min_delta: 0.001
+  learning_rate: 0.0002
+  # Fine-tune the pretrained encoder gently while the fresh decoder learns fast (item 5).
+  encoder_lr_ratio: 0.1
+  weight_decay: 0.0001
+  accelerator: "auto"
+  devices: "auto"
+  precision: "32-true"
+  threshold: 0.5          # tune post-training with tools/tune_threshold.py (item 2)
+
+  # Metric driving checkpointing / early stopping / LR schedule. Now computed
+  # micro-averaged over the whole val epoch (fixed earlier), so it tracks the
+  # real whole-image score. Switch to val/dice if that's your reporting target.
+  monitor_metric: "val/tversky"
+  monitor_mode: "max"
+
+  loss:
+    name: "bce_focal_tversky"
+    tversky_alpha: 0.3
+    tversky_beta: 0.7
+    focal_gamma: 0.75
+    # Topology term for thin fibers: penalizes broken connectivity (item 6).
+    cldice_weight: 0.5
+    cldice_iters: 5
+
+  scheduler:
+    name: "reduce_on_plateau"
+    patience: 4
+    factor: 0.5
+    min_lr: 0.000001
+
+  # Stochastic Weight Averaging: cheap generalization gain on small datasets (item 7).
+  swa: true
+  swa_lr: 0.0001
+
+  matmul_precision: "medium"
+  log_every_n_steps: 10
+  val_check_interval: 1.0
+  deterministic: false
+  profiler: null
+  model_export_path: null
+
+# Tiled-inference quality (items 3 & 4). tta is off for speed; turn on for final
+# predictions (8x inference cost, no retrain, typically +1-2 dice).
+inference:
+  tile_blend: "gaussian"
+  reflect_pad: true
+  tta: false
+
+augmentations:
+  train:
+    - name: HorizontalFlip
+      p: 0.5
+    - name: VerticalFlip
+      p: 0.5
+    - name: RandomRotate90
+      p: 0.5
+    - name: Affine
+      # Wider scale range: fiber pixel-width varies with SEM magnification (item 8).
+      scale: [0.75, 1.35]
+      translate_percent: [-0.05, 0.05]
+      rotate: [-15, 15]
+      p: 0.5
+    - name: RandomBrightnessContrast
+      brightness_limit: 0.15
+      contrast_limit: 0.15
+      p: 0.4
+    # SEM-realistic sensor noise. std_range is calibrated for the [0,1] scale this
+    # pipeline normalizes to (see augmentations.py GaussNoise guard).
+    - name: GaussNoise
+      std_range: [0.02, 0.08]
+      p: 0.3
+    - name: GaussianBlur
+      blur_limit: [3, 5]
+      p: 0.2
+  val: []
+  test: []

@@ -16,10 +16,19 @@ import lightning.pytorch as pl
 import mlflow
 import torch
 import yaml
-from lightning.pytorch.callbacks import EarlyStopping, LearningRateMonitor, ModelCheckpoint
+from lightning.pytorch.callbacks import (
+    EarlyStopping,
+    LearningRateMonitor,
+    ModelCheckpoint,
+    StochasticWeightAveraging,
+)
 from lightning.pytorch.loggers import MLFlowLogger
 
-from .callbacks import BestModelPredictionImageLogger, PeriodicPredictionImageLogger
+from .callbacks import (
+    BestModelPredictionImageLogger,
+    HardNegativeMiningCallback,
+    PeriodicPredictionImageLogger,
+)
 from .config import AppConfig, TrainConfig, load_config, to_dict
 from .dataset import FiberDataModule, split_filenames
 from .lit_module import FiberSegmentationLitModule
@@ -276,16 +285,37 @@ def _run_single_training(cfg: AppConfig):
     logger.log_hyperparams({"checkpoint_dir": str(checkpoint_dir), "resumed_from": resume_ckpt or ""})
     _save_split_files(cfg, checkpoint_dir, logger)
 
+    if cfg.data.image_normalization == "dataset":
+        if cfg.data.norm_mean is None or cfg.data.norm_std is None:
+            raise ValueError(
+                "image_normalization: 'dataset' requires data.norm_mean/norm_std. "
+                "Compute them first:\n"
+                f"  python -m fiberseg.tools.compute_dataset_stats --config <cfg> --write"
+            )
+        if cfg.model.encoder_weights is not None:
+            print(
+                "Warning: image_normalization: 'dataset' is intended for from-scratch "
+                f"training, but encoder_weights={cfg.model.encoder_weights!r} is set. "
+                "For a pretrained encoder, 'imagenet' usually matches its expected input better."
+            )
+
     datamodule = FiberDataModule(cfg.data, cfg.augmentations)
     datamodule.setup("fit")
     _log_filtered_tile_stats(cfg, datamodule, logger)
     model = FiberSegmentationLitModule(cfg.model, cfg.train)
 
+    # The LightningModule logs each metric under both "val/x" and "val_x"; the
+    # filename template must use the underscore form since "/" is not a valid
+    # format key. Derive it from the configured monitor so both always agree.
+    monitor_metric = cfg.train.monitor_metric
+    monitor_mode = cfg.train.monitor_mode
+    monitor_filename_key = monitor_metric.replace("/", "_")
+
     best_checkpoint_callback = ModelCheckpoint(
         dirpath=str(checkpoint_dir),
-        monitor="val/tversky",
-        mode="max",
-        filename="best-{epoch:03d}-{val_tversky:.4f}",
+        monitor=monitor_metric,
+        mode=monitor_mode,
+        filename="best-{epoch:03d}-{" + monitor_filename_key + ":.4f}",
         save_top_k=1,
         auto_insert_metric_name=False,
     )
@@ -294,6 +324,18 @@ def _run_single_training(cfg: AppConfig):
         ModelCheckpoint(dirpath=str(checkpoint_dir), filename="last", save_last=True),
         LearningRateMonitor(logging_interval="epoch"),
     ]
+
+    # Hard-negative mining: only when the datamodule built a WeightedTileSampler.
+    # The callback pulls the (possibly re-created) sampler from the datamodule at
+    # runtime, so no sampler reference is captured here.
+    train_sampler = getattr(datamodule, "train_sampler", None)
+    if train_sampler is not None:
+        callbacks.append(HardNegativeMiningCallback())
+        print(
+            f"Tile sampling: weighted (positives={train_sampler.pos.size}, "
+            f"negatives/epoch={len(train_sampler) - train_sampler.pos.size} "
+            f"of {train_sampler.neg.size}, hard_fraction={cfg.data.hard_negative_fraction})"
+        )
 
     if cfg.logging.log_prediction_images:
         callbacks.append(
@@ -318,10 +360,21 @@ def _run_single_training(cfg: AppConfig):
     if cfg.train.max_epochs >= 10:
         callbacks.append(
             EarlyStopping(
-                monitor="val/tversky",
-                mode="max",
+                monitor=monitor_metric,
+                mode=monitor_mode,
                 patience=cfg.train.early_stopping.patience,
                 min_delta=cfg.train.early_stopping.min_delta,
+            )
+        )
+
+    # Stochastic Weight Averaging: cheap tail-of-training weight averaging. Placed
+    # after EarlyStopping so both see the same monitored metric; SWA runs one extra
+    # epoch at the end to recompute BatchNorm stats on the averaged weights.
+    if cfg.train.swa:
+        callbacks.append(
+            StochasticWeightAveraging(
+                swa_lrs=cfg.train.swa_lr,
+                swa_epoch_start=0.75,
             )
         )
 

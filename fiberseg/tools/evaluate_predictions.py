@@ -34,7 +34,7 @@ def compute_metrics(
     eps: float = 1e-8,
 ) -> dict[str, float]:
     """Binary segmentation metrics for one image, using the same tp/fp/fn formulas as
-    `lit_module._binary_stats` plus classic accuracy/specificity/confusion counts.
+    `lit_module._stats_from_counts` plus classic accuracy/specificity/confusion counts.
     """
     if pred_mask.shape != gt_mask.shape:
         raise ValueError(

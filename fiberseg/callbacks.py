@@ -13,6 +13,48 @@ import numpy as np
 import torch
 from lightning.pytorch.loggers import MLFlowLogger
 
+from .lit_module import _stats_from_counts
+
+
+class HardNegativeMiningCallback(pl.Callback):
+    """Feed per-tile training difficulty back into a WeightedTileSampler each epoch.
+
+    Collects the (tile_index, tile_difficulty) pairs that training_step returns in
+    weighted-sampling mode, and at epoch end pushes the latest per-tile loss into the
+    sampler so the next epoch can bias its negative draw toward hard negatives.
+
+    The sampler is fetched from `trainer.datamodule` at runtime rather than captured
+    at construction: Lightning re-runs `datamodule.setup("fit")` inside `fit()`, which
+    rebuilds the sampler, so a captured reference would go stale. A no-op unless the
+    datamodule actually exposes a `train_sampler`.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._indices: list[torch.Tensor] = []
+        self._losses: list[torch.Tensor] = []
+
+    @staticmethod
+    def _sampler(trainer):
+        return getattr(getattr(trainer, "datamodule", None), "train_sampler", None)
+
+    def on_train_epoch_start(self, trainer, pl_module):
+        self._indices = []
+        self._losses = []
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        if isinstance(outputs, dict) and "tile_index" in outputs:
+            self._indices.append(outputs["tile_index"])
+            self._losses.append(outputs["tile_difficulty"])
+
+    def on_train_epoch_end(self, trainer, pl_module):
+        sampler = self._sampler(trainer)
+        if sampler is None or not self._indices:
+            return
+        indices = torch.cat(self._indices).numpy()
+        losses = torch.cat(self._losses).numpy()
+        sampler.update_difficulty(indices, losses)
+
 
 class PeriodicPredictionImageLogger(pl.Callback):
     """
@@ -69,11 +111,7 @@ class PeriodicPredictionImageLogger(pl.Callback):
         if val_dataset is None or len(val_dataset) == 0:
             return
 
-        metric_value = trainer.callback_metrics.get("val/tversky")
-        metric_text = "none"
-
-        if metric_value is not None:
-            metric_text = f"{float(metric_value.detach().cpu().item()):.5f}"
+        metric_text = self._current_val_tversky(pl_module)
 
         artifact_path = f"{self.artifact_dir}/epoch_{epoch + 1:03d}_val_tversky_{metric_text}"
 
@@ -88,6 +126,26 @@ class PeriodicPredictionImageLogger(pl.Callback):
             artifact_path=artifact_path,
             title_prefix=f"Periodic validation epoch={epoch + 1}",
         )
+
+    @staticmethod
+    def _current_val_tversky(pl_module) -> str:
+        """Compute this epoch's val/tversky from the module's accumulated tp/fp/fn counts.
+
+        Callback ``on_validation_epoch_end`` hooks run *before* the LightningModule's, so
+        ``callback_metrics["val/tversky"]`` still holds the previous epoch's value here;
+        reading the live counts gives the current epoch's number for the artifact name.
+        """
+        tp = getattr(pl_module, "_val_tp", None)
+        if tp is None:
+            return "none"
+        stats = _stats_from_counts(
+            tp,
+            pl_module._val_fp,
+            pl_module._val_fn,
+            pl_module.train_cfg.loss.tversky_alpha,
+            pl_module.train_cfg.loss.tversky_beta,
+        )
+        return f"{stats['tversky']:.5f}"
 
 
 class BestModelPredictionImageLogger(pl.Callback):

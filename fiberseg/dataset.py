@@ -14,7 +14,7 @@ import numpy as np
 import tifffile
 import torch
 from PIL import Image
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Sampler
 
 from .augmentations import build_transform
 from .config import DataConfig
@@ -87,6 +87,107 @@ def _normalize_image(img: np.ndarray) -> np.ndarray:
         img = np.zeros_like(img, dtype=np.float32)
 
     return np.clip(img, 0.0, 1.0).astype(np.float32)
+
+
+# ImageNet channel statistics. The 3-channel values are the standard RGB
+# constants every ImageNet-pretrained (and MicroNet, which fine-tunes from
+# ImageNet) encoder in segmentation_models_pytorch expects. The 1-channel value
+# is the standard ImageNet grayscale mean/std, used when a single-channel model
+# still wants pretrained-style standardization.
+_IMAGENET_MEAN_3 = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+_IMAGENET_STD_3 = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+_IMAGENET_MEAN_1 = np.float32(0.449)
+_IMAGENET_STD_1 = np.float32(0.226)
+
+
+def _apply_channel_norm(
+    chw: np.ndarray,
+    mode: str,
+    mean: list[float] | None = None,
+    std: list[float] | None = None,
+) -> np.ndarray:
+    """Standardize a CxHxW float32 tile in place-safe fashion, per `mode`.
+
+    "minmax"   -> return unchanged (values stay in [0, 1]).
+    "imagenet" -> subtract ImageNet mean and divide by ImageNet std per channel,
+                  matching the input distribution ImageNet/MicroNet-pretrained
+                  encoders were trained on.
+    "dataset"  -> subtract this dataset's own per-channel `mean` and divide by `std`
+                  (computed over the training split; see compute_normalization_stats).
+                  For from-scratch training where no pretrained distribution applies.
+
+    Must be applied identically at training (dataset.__getitem__) and inference
+    (predict_tiles._make_model_input); both call this so they can never drift.
+    """
+    if mode == "minmax":
+        return chw
+
+    channels = chw.shape[0]
+
+    if mode == "imagenet":
+        if channels == 3:
+            m = _IMAGENET_MEAN_3[:, None, None]
+            s = _IMAGENET_STD_3[:, None, None]
+        elif channels == 1:
+            m = _IMAGENET_MEAN_1
+            s = _IMAGENET_STD_1
+        else:
+            raise ValueError(
+                f"imagenet normalization supports 1 or 3 channels, got {channels}."
+            )
+        return (chw - m) / s
+
+    if mode == "dataset":
+        if mean is None or std is None:
+            raise ValueError(
+                "image_normalization: 'dataset' requires data.norm_mean/norm_std. "
+                "Compute them with: python -m fiberseg.tools.compute_dataset_stats "
+                "--config <cfg> --write"
+            )
+        m = np.asarray(mean, dtype=np.float32)
+        s = np.asarray(std, dtype=np.float32)
+        if m.shape[0] != channels or s.shape[0] != channels:
+            raise ValueError(
+                f"norm_mean/norm_std length must equal channels={channels}, "
+                f"got mean={m.shape[0]}, std={s.shape[0]}."
+            )
+        return (chw - m[:, None, None]) / s[:, None, None]
+
+    raise ValueError(
+        f"Unsupported image_normalization={mode!r}. Use 'minmax', 'imagenet', or 'dataset'."
+    )
+
+
+def compute_normalization_stats(cfg: DataConfig) -> tuple[list[float], list[float]]:
+    """Per-channel mean/std over the TRAINING split's percentile-normalized images.
+
+    Uses only the train split (never val/test) so tuning normalization can't leak
+    evaluation data. Source images are grayscale, so a single grayscale statistic is
+    computed over all training pixels and repeated for `image_channels` (the dataset
+    replicates that one grayscale channel, so every channel shares the same stat).
+    Computed in the same [0, 1] space `_apply_channel_norm` operates on.
+    """
+    pairs = [p for p in find_pairs(cfg) if p.split == "train"]
+    if not pairs:
+        raise ValueError("No training pairs available to compute normalization stats from.")
+
+    total = 0
+    pixel_sum = 0.0
+    pixel_sqsum = 0.0
+    for pair in pairs:
+        img = _normalize_image(_read_gray(pair.image_path)).astype(np.float64).ravel()
+        total += img.size
+        pixel_sum += float(img.sum())
+        pixel_sqsum += float(np.square(img).sum())
+
+    mean = pixel_sum / total
+    var = max(pixel_sqsum / total - mean * mean, 0.0)
+    std = float(np.sqrt(var))
+    if std <= 0:
+        std = 1.0  # constant image; avoid divide-by-zero at standardization time.
+
+    channels = int(cfg.image_channels)
+    return [float(mean)] * channels, [std] * channels
 
 
 def _pad_to_shape(arr: np.ndarray, h: int, w: int, constant: float = 0) -> np.ndarray:
@@ -278,6 +379,15 @@ class TiledSegmentationDataset(Dataset):
                 f"No pairs for split={split!r}. Add more images or adjust split fractions."
             )
         self.filtered_tiles_count = 0
+        # In "weighted" sampling mode a WeightedTileSampler resamples tiles each
+        # epoch, so the dataset must keep ALL tiles (skip the static filter) and
+        # return the tile index from __getitem__ so training can attribute per-tile
+        # difficulty back for hard-negative mining.
+        self.weighted_sampling = split == "train" and cfg.tile_sampling == "weighted"
+        self.return_index = self.weighted_sampling
+        # Per-tile positive flag (foreground >= min_foreground_fraction), populated
+        # by _make_tiles; used by WeightedTileSampler. Empty for non-weighted use.
+        self.tile_is_positive: list[bool] = []
         self.tiles = self._make_tiles()
         if not self.tiles:
             raise ValueError(f"No tiles found for split={split!r}.")
@@ -301,28 +411,38 @@ class TiledSegmentationDataset(Dataset):
 
         tiles: list[Tile] = []
 
+        # Whether we need each tile's foreground fraction: for static filtering, or
+        # to mark positives/negatives for the weighted sampler.
+        need_fg = self.split == "train" and (
+            self.weighted_sampling
+            or self.cfg.min_foreground_fraction > 0
+            or self.cfg.keep_empty_probability < 1
+        )
+
         for pair in self.pairs:
             img = _cached_read(str(pair.image_path))
             H, W = img.shape[:2]
 
             for y in self._positions(H, self.patch_h, self.stride_h):
                 for x in self._positions(W, self.patch_w, self.stride_w):
-                    if self.split == "train" and (
-                        self.cfg.min_foreground_fraction > 0
-                        or self.cfg.keep_empty_probability < 1
-                    ):
+                    fg = None
+                    if need_fg:
                         mask = _cached_read(str(pair.mask_path))
                         m = mask[y:y+self.patch_h, x:x+self.patch_w]
-                        fg = float((m > 0).mean()) if m.size else 0.0 
+                        fg = float((m > 0).mean()) if m.size else 0.0
 
-                        if (
-                            fg < self.cfg.min_foreground_fraction
-                            and rng.random() > self.cfg.keep_empty_probability
-                        ):
-                            self.filtered_tiles_count += 1
-                            continue
+                    # Static filtering: drop most empty tiles up front. Skipped in
+                    # weighted mode, where the sampler handles the balance instead.
+                    if not self.weighted_sampling and need_fg and (
+                        fg < self.cfg.min_foreground_fraction
+                        and rng.random() > self.cfg.keep_empty_probability
+                    ):
+                        self.filtered_tiles_count += 1
+                        continue
 
                     tiles.append(Tile(pair, y, x, self.patch_h, self.patch_w))
+                    if self.weighted_sampling:
+                        self.tile_is_positive.append(fg >= self.cfg.min_foreground_fraction)
 
         return tiles
 
@@ -372,10 +492,101 @@ class TiledSegmentationDataset(Dataset):
                 "Use image_channels: 1 or image_channels: 3."
             )
 
+        # Final per-channel standardization (identical to inference). Kept out of
+        # the disk cache on purpose: the cache stores percentile-normalized [0, 1]
+        # images and stays valid regardless of image_normalization mode.
+        img = _apply_channel_norm(
+            img.astype(np.float32),
+            self.cfg.image_normalization,
+            self.cfg.norm_mean,
+            self.cfg.norm_std,
+        )
+
         img_t = torch.from_numpy(np.ascontiguousarray(img)).float()
         mask_t = torch.from_numpy(np.ascontiguousarray(mask)).float().unsqueeze(0)
 
+        if self.return_index:
+            # 3-tuple only in weighted mode; the training loop uses the index to
+            # attribute per-tile difficulty for hard-negative mining.
+            return img_t, mask_t, idx
+
         return img_t, mask_t
+
+
+class WeightedTileSampler(Sampler):
+    """Per-epoch resampling of training tiles for online hard-negative mining.
+
+    Each epoch yields every positive tile plus a fresh draw of
+    `round(negative_ratio * n_positives)` negatives. The negative draw is uniform
+    during warmup (and whenever hard_negative_fraction == 0); afterward a
+    `hard_negative_fraction` slice of it is drawn weighted by each negative tile's
+    most recent training loss (hard negatives the model currently gets wrong),
+    with the remainder still uniform to preserve coverage.
+
+    `__len__` is constant across epochs (positives + fixed negative count) so
+    Lightning's progress bar and step counting stay stable. `update_difficulty`
+    is called once per epoch (by HardNegativeMiningCallback) with the losses seen.
+    """
+
+    def __init__(
+        self,
+        is_positive: list[bool],
+        negative_ratio: float,
+        hard_negative_fraction: float,
+        warmup_epochs: int,
+        seed: int,
+    ):
+        flags = np.asarray(is_positive, dtype=bool)
+        self.pos = np.flatnonzero(flags)
+        self.neg = np.flatnonzero(~flags)
+        self.negative_ratio = float(negative_ratio)
+        self.hard_fraction = float(hard_negative_fraction)
+        self.warmup_epochs = int(warmup_epochs)
+        self.seed = int(seed)
+        self.epoch = 0
+        # Per-tile difficulty (training loss); 1.0 until observed so unseen tiles
+        # start with uniform weight.
+        self.difficulty = np.ones(flags.shape[0], dtype=np.float64)
+        self._n_neg = self._negatives_per_epoch()
+
+    def _negatives_per_epoch(self) -> int:
+        if self.pos.size == 0:
+            # Degenerate split with no positive tiles: fall back to all negatives.
+            return self.neg.size
+        want = int(round(self.negative_ratio * self.pos.size))
+        return min(self.neg.size, want)
+
+    def update_difficulty(self, indices: np.ndarray, losses: np.ndarray) -> None:
+        """Record the latest per-tile training loss (used to weight hard negatives)."""
+        self.difficulty[indices] = losses
+
+    def _draw_negatives(self, rng: np.random.Generator) -> np.ndarray:
+        n = self._n_neg
+        if n == 0 or self.neg.size == 0:
+            return np.empty(0, dtype=np.int64)
+
+        uniform = self.epoch < self.warmup_epochs or self.hard_fraction <= 0.0
+        if uniform:
+            return rng.choice(self.neg, size=n, replace=n > self.neg.size)
+
+        n_hard = int(round(self.hard_fraction * n))
+        n_rand = n - n_hard
+
+        weights = np.clip(self.difficulty[self.neg], 1e-6, None)
+        weights = weights / weights.sum()
+        hard = rng.choice(self.neg, size=n_hard, replace=n_hard > self.neg.size, p=weights)
+        rand = rng.choice(self.neg, size=n_rand, replace=n_rand > self.neg.size)
+        return np.concatenate([hard, rand])
+
+    def __iter__(self):
+        rng = np.random.default_rng(self.seed + self.epoch)
+        order = np.concatenate([self.pos, self._draw_negatives(rng)])
+        rng.shuffle(order)
+        self.epoch += 1
+        return iter(order.tolist())
+
+    def __len__(self) -> int:
+        return int(self.pos.size + self._n_neg)
 
 
 class FiberDataModule(pl.LightningDataModule):
@@ -400,18 +611,33 @@ class FiberDataModule(pl.LightningDataModule):
             self.train_ds = TiledSegmentationDataset(self.cfg, "train", self.train_tf)
             self.val_ds = TiledSegmentationDataset(self.cfg, "val", self.val_tf)
 
+            # Build the hard-negative sampler once, if enabled. Held on the
+            # datamodule so HardNegativeMiningCallback can push difficulty into it.
+            self.train_sampler = None
+            if getattr(self.train_ds, "weighted_sampling", False):
+                self.train_sampler = WeightedTileSampler(
+                    is_positive=self.train_ds.tile_is_positive,
+                    negative_ratio=self.cfg.negative_ratio,
+                    hard_negative_fraction=self.cfg.hard_negative_fraction,
+                    warmup_epochs=self.cfg.hard_negative_warmup_epochs,
+                    seed=self.cfg.seed,
+                )
+
         if stage in (None, "test"):
             self.test_ds = TiledSegmentationDataset(self.cfg, "test", self.test_tf)
 
-    def _loader(self, dataset, shuffle: bool):
+    def _loader(self, dataset, shuffle: bool, sampler=None):
         cuda_available = torch.cuda.is_available()
         kwargs = {
             "batch_size": self.cfg.batch_size,
-            "shuffle": shuffle,
+            # A custom sampler and shuffle are mutually exclusive in DataLoader.
+            "shuffle": shuffle if sampler is None else False,
             "num_workers": self.cfg.num_workers,
             "pin_memory": cuda_available,
             "persistent_workers": self.cfg.num_workers > 0,
         }
+        if sampler is not None:
+            kwargs["sampler"] = sampler
 
         if self.cfg.num_workers > 0:
             kwargs["prefetch_factor"] = 4
@@ -419,7 +645,8 @@ class FiberDataModule(pl.LightningDataModule):
         return DataLoader(dataset, **kwargs)
 
     def train_dataloader(self):
-        return self._loader(self.train_ds, shuffle=True)
+        sampler = getattr(self, "train_sampler", None)
+        return self._loader(self.train_ds, shuffle=True, sampler=sampler)
 
     def val_dataloader(self):
         return self._loader(self.val_ds, shuffle=False)
