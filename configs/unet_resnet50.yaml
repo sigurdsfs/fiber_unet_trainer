@@ -1,0 +1,93 @@
+# Simple parameter sweep configuration for SEM fiber segmentation.
+# Run with:
+#   python -m fiberseg.sweep --config configs/simple_sweep.yaml
+
+mlflow:
+  tracking_uri: "http://127.0.0.1:5000"
+  experiment_name: "fiber-sem-simple-sweep"
+  run_name: null
+
+
+
+data:
+  images_dir: "C:/Users/lababr/Desktop/Current Training Material - fibers only - Preproc"
+  masks_dir: "C:/Users/lababr/Desktop/Current Training Material - fibers only - Preproc"
+  image_glob: "*.tif"
+  mask_pattern: "{stem}_mask.tif"
+  patch_size: 512
+  stride: 256
+  batch_size: 8
+  num_workers: 4
+  seed: 42
+  split:
+    train: 0.7
+    val: 0.15
+    test: 0.15
+  min_foreground_fraction: 0.001
+  keep_empty_probability: 0.2
+
+model:
+  architecture: "Unet"
+  encoder_name: "resnet50"
+  encoder_weights: null
+  in_channels: 1
+  classes: 1
+
+train:
+  max_epochs: 400
+  early_stopping:
+    patience: 10
+    min_delta: 0.001  # min val/tversky gain to count as "improvement"
+  learning_rate: 0.0002
+  weight_decay: 0.0001
+  accelerator: "auto"
+  devices: "auto"
+  precision: "32-true"
+  threshold: 0.5
+  loss:
+    name: "bce_focal_tversky"
+    tversky_alpha: 0.3
+    tversky_beta: 0.7
+    focal_gamma: 0.75
+  scheduler:
+    name: "reduce_on_plateau"
+    patience: 3
+    factor: 0.5
+    min_lr: 0.000001
+  matmul_precision: "medium"
+  
+  log_every_n_steps: 10
+  val_check_interval: 1.0
+  deterministic: false
+  
+  # Diagnostic-specific settings.
+  profiler: "simple"          # "simple", "advanced", or "pytorch"
+
+  # Export the best checkpoint to TorchScript right after training, named after
+  # the MLflow experiment/run. Leave null to skip export.
+  model_export_path: null
+
+
+augmentations:
+  train:
+    - name: HorizontalFlip
+      p: 0.5
+    - name: VerticalFlip
+      p: 0.5
+    - name: RandomRotate90
+      p: 0.5
+    - name: Affine
+      scale: [0.9, 1.1]
+      translate_percent: [-0.05, 0.05]
+      rotate: [-15, 15]
+      p: 0.5
+    - name: RandomBrightnessContrast
+      brightness_limit: 0.15
+      contrast_limit: 0.15
+      p: 0.4
+  
+  
+  val: []
+  test: []
+
+

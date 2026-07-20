@@ -1,0 +1,49 @@
+# Config for fiberseg.tools.foreground_filter_sweep.
+#
+# Run with:
+#   python -m fiberseg.tools.foreground_filter_sweep --config configs/foreground_filter_sweep_example.yaml
+#
+# Only the `data` section (for locating images/masks) and the `foreground_filter_sweep`
+# section (for which combinations to test) are read - model/train/mlflow/etc are ignored.
+
+data:
+  images_dir: 'C:\Users\sigur\Desktop\Current Training Material - fibers only - Preproc'
+  masks_dir: 'C:\Users\sigur\Desktop\Current Training Material - fibers only - Preproc'
+  image_glob: "*.tif"
+  mask_pattern: "{stem}_mask.tif"
+  seed: 42
+  split:
+    train: 0.7
+    val: 0.15
+    test: 0.15
+
+foreground_filter_sweep:
+  # Every patch size below is tested against every foreground fraction below
+  # (full cartesian product).
+  patch_sizes: [256, 512, 1024]
+
+  # Optional: one stride per patch size, same order/length as patch_sizes.
+  # Delete this key (or leave it out) to default to stride == patch_size
+  # (non-overlapping tiling) for every patch size tested.
+  strides: [256, 512, 1024]
+
+  foreground_fractions: [0.0, 0.00005, 0.0005, 0.005, 0.02, 0.05]
+
+  # 0.0 makes filtering deterministic: every patch below the cutoff is filtered,
+  # every patch at/above it is kept. Set this to match a real config's
+  # keep_empty_probability if you want the randomized-keep behavior reflected too.
+  keep_empty_probability: 0.0
+
+  # Filtering only ever applies to the "train" split during real training, so that's
+  # the default scope here too. Use "all" to inspect every image/mask pair instead.
+  split: train
+
+  # Absolute foreground-fraction band around each cutoff used to pick the
+  # "just under" / "just over" example crops.
+  boundary_margin: 0.0001
+
+  # Max number of example crops saved per side (under/over) per combination.
+  n_examples: 8
+
+  out: foreground_filter_sweep_results
+  dpi: 150

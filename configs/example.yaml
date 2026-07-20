@@ -1,0 +1,112 @@
+# Minimal local SEM fiber segmentation training config.
+# Folder assumption:
+#   data/images/sample01.tif
+#   data/masks/sample01_mask.tif
+
+data:
+  images_dir: "./data/images"
+  masks_dir: "./data/masks"
+  image_glob: "*.tif"
+  mask_pattern: "{stem}_mask.tif"
+  patch_size: 512
+  stride: 512
+  batch_size: 4
+  num_workers: 4
+  seed: 42
+  split:
+    train: 0.7
+    val: 0.15
+    test: 0.15
+  # Useful for sparse masks. Set min_foreground_fraction to e.g. 0.001 and keep_empty_probability to 0.2
+  # to keep all fiber-containing tiles but only 20% of empty background tiles.
+  min_foreground_fraction: 0.0
+  keep_empty_probability: 1.0
+
+model:
+  architecture: "Unet"       # exchangeable: Unet, UnetPlusPlus, FPN, DeepLabV3Plus, etc.
+  encoder_name: "resnet34"   # exchangeable: resnet18, resnet34, resnet50, efficientnet-b0, etc.
+  encoder_weights: null      # null = random weights; use "imagenet" for pretrained encoder
+  in_channels: 1             # grayscale SEM
+  classes: 1                 # binary mask
+
+train:
+  max_epochs: 50
+  learning_rate: 0.0001
+  weight_decay: 0.0001
+  accelerator: "auto"
+  devices: "auto"
+  precision: "32-true"
+  threshold: 0.5
+
+  loss:
+    # Use "bce_dice" for a standard baseline.
+    # Use "focal_tversky" or "bce_focal_tversky" for sparse foreground masks.
+    name: "bce_focal_tversky"
+    tversky_alpha: 0.3      # false-positive penalty
+    tversky_beta: 0.7       # false-negative penalty; larger value means missed fibers matter more
+    focal_gamma: 0.75
+
+  # Only useful when model.encoder_weights is "imagenet"/"micronet" (a pretrained
+  # encoder). Gives the encoder its own LR = learning_rate * encoder_lr_ratio so
+  # pretrained features are fine-tuned gently while the randomly-initialized
+  # decoder learns faster. Leave null for from-scratch training (encoder_weights:
+  # null, as above) -- a single shared LR is correct there.
+  # encoder_lr_ratio: 0.1
+
+  # Adaptive learning rate. Reduces LR when validation Tversky stops improving.
+  # min_lr is a single floor shared by every param group, so if encoder_lr_ratio
+  # is set, size it relative to the smaller (encoder) LR: roughly
+  # (learning_rate * encoder_lr_ratio) / 10, not learning_rate / 10.
+  scheduler:
+    name: "reduce_on_plateau"
+    patience: 5
+    factor: 0.5
+    min_lr: 0.000001
+
+  matmul_precision: "medium"
+  log_every_n_steps: 10
+  val_check_interval: 1.0
+  deterministic: false
+
+  # Export the best checkpoint to TorchScript right after training, named after
+  # the MLflow experiment/run. Leave null to skip export.
+  model_export_path: null
+
+mlflow:
+  tracking_uri: "http://127.0.0.1:5000"
+  experiment_name: "fiber-sem-segmentation"
+  run_name: null
+
+augmentations:
+  train:
+    - name: HorizontalFlip
+      p: 0.5
+    - name: VerticalFlip
+      p: 0.5
+    - name: RandomRotate90
+      p: 0.5
+    - name: Affine
+      scale: [0.9, 1.1]
+      translate_percent: [-0.05, 0.05]
+      rotate: [-15, 15]
+      p: 0.5
+    - name: RandomBrightnessContrast
+      brightness_limit: 0.15
+      contrast_limit: 0.15
+      p: 0.4
+    - name: GaussNoise
+      std_range: [0.02, 0.08]
+      p: 0.2
+    - name: GaussianBlur
+      blur_limit: [3, 5]
+      p: 0.15
+  val: []
+  test: []
+
+# Run all combinations with:
+#   python -m fiberseg.sweep --config configs/example.yaml
+sweep:
+  data.patch_size: [256, 512]
+  data.stride: [256, 512]
+  train.learning_rate: [0.0001, 0.0003]
+  model.encoder_name: ["resnet18", "resnet34"]

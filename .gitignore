@@ -1,0 +1,61 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+build/
+dist/
+.eggs/
+
+# --- Virtual environments ---
+.venv/
+venv/
+env/
+
+# --- Testing / linting caches ---
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# --- IDE / editor ---
+.vscode/
+.idea/
+
+# --- Claude Code ---
+.claude/
+
+# --- MLflow ---
+mlruns/
+mlartifacts/
+
+# Stray numeric MLflow experiment-id directories occasionally created at repo root
+/[0-9]*/
+
+# --- Training outputs / large generated artifacts ---
+checkpoints/
+lightning_logs/
+exported_models/
+predictions/
+otsu_masks/
+cache/
+augmentation_preview_v2/
+foreground_filter_sweep_results/
+simple_sweep/
+
+# Model weights / checkpoints anywhere in the tree
+*.ckpt
+*.pth
+*.pt
+
+# --- Data (raw images/masks, per CLAUDE.md data layout) ---
+data/
+
+# --- Notebook checkpoints / generated notebook outputs ---
+.ipynb_checkpoints/
+
+# --- Misc generated files ---
+*.log
+plot.png
