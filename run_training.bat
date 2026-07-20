@@ -1,7 +1,7 @@
 @echo off
 setlocal
 
-cd /d "C:\Users\lababr\Desktop\fiber_unet_trainer_v2 - Sigurd\fiber_unet_trainer"
+cd /d "%~dp0"
 
 call conda activate cnn_test
 
@@ -11,7 +11,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-python -m fiberseg.train --config ".\configs\unetPlus_resnet50.yaml"
+python -m fiberseg.train --config ".\configs\micronet\unet_resnet50.yaml"
 
 echo.
 echo Training command finished.
