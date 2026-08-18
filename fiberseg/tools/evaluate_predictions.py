@@ -5,6 +5,10 @@ Matches each prediction mask in `--pred-dir` (named `{image_stem}{suffix}`, the 
 used by `predict_tiles.py`/`predict_all.py`) back to its source image via the config's
 `data.images_dir`/`data.mask_pattern` (same pairing logic as `dataset.find_pairs`), then
 compares it against the corresponding ground-truth mask pixel-by-pixel.
+
+Looks for each prediction under `--pred-dir/<train|validation|test>/` first, matching
+`predict_all.py`'s split-subfolder layout, then falls back to a flat `--pred-dir` for
+predictions written by `predict_tiles.py` (single image) or older flat `predict_all.py` runs.
 """
 from __future__ import annotations
 
@@ -16,7 +20,7 @@ from pathlib import Path
 import numpy as np
 
 from ..config import load_config
-from ..dataset import _read_gray, find_pairs
+from ..dataset import SPLIT_DIRS, _read_gray, find_pairs
 
 FIELDNAMES = [
     "image", "split",
@@ -95,9 +99,15 @@ def main():
     missing = []
 
     for pair in pairs:
-        pred_path = pred_dir / f"{pair.image_path.stem}{args.suffix}"
-        if not pred_path.exists():
-            missing.append(pred_path)
+        # predict_all.py writes into a train/validation/test subfolder by split; older
+        # runs (or predict_tiles.py on a single image) may have written flat instead.
+        candidates = [
+            pred_dir / SPLIT_DIRS[pair.split] / f"{pair.image_path.stem}{args.suffix}",
+            pred_dir / f"{pair.image_path.stem}{args.suffix}",
+        ]
+        pred_path = next((p for p in candidates if p.exists()), None)
+        if pred_path is None:
+            missing.append(candidates[0])
             continue
 
         gt_mask = _read_gray(pair.mask_path)

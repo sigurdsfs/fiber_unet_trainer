@@ -133,11 +133,21 @@ skeleton-based) is **added on top of any base loss** to penalize broken thin fib
 the old per-batch ratio average let empty tiles score ~0 and deflate `val/tversky` far below the
 true whole-image score on sparse masks. Don't revert it to per-step logging.
 
+Alongside those hard, `threshold`-binarized stats, the same accumulate-then-ratio pattern is
+repeated with **threshold-free** sums (`_soft_confusion_sums`, continuous sigmoid probabilities,
+no binarization) to produce `val/soft_*`/`test/soft_*` (`soft_dice`, `soft_iou`, `soft_tversky`,
+...). These track the same continuous quantity the loss optimizes, independent of whatever
+`train.threshold` happens to be set to — the hard `val/tversky`-style metrics stay only for
+deployment-realistic reporting at the actual decision threshold (which `tools/tune_threshold.py`
+calibrates separately, after training, rather than during it).
+
 `configure_optimizers` supports `scheduler: reduce_on_plateau` or `cosine`. The metric driving
 checkpointing (`ModelCheckpoint`), early stopping (`EarlyStopping`), and the plateau scheduler is
-configurable via `train.monitor_metric`/`train.monitor_mode` (default `val/tversky`/`max`); the
-checkpoint filename key is derived from it. See [IMPROVEMENTS.md](fiber_unet_trainer/IMPROVEMENTS.md)
-for the full rationale of these and the other performance changes.
+configurable via `train.monitor_metric`/`train.monitor_mode` (default `val/soft_tversky`/`max`) —
+deliberately one of the threshold-free metrics above, so training control decisions aren't coupled
+to an as-yet-uncalibrated threshold; the checkpoint filename key is derived from it. See
+[IMPROVEMENTS.md](fiber_unet_trainer/IMPROVEMENTS.md) for the full rationale of these and the
+other performance changes.
 
 ### Training entry point and the two sweep mechanisms
 
@@ -168,21 +178,46 @@ padding for edge tiles (`inference.reflect_pad: true`); optional 8× dihedral te
 don't reimplement the tiling loop.
 
 [fiberseg/predict_all.py](fiber_unet_trainer/fiberseg/predict_all.py) reuses those same
-`predict_tiles` functions to run inference over every image under a config's
-`data.images_dir`/`data.image_glob` (same discovery/exclusion rule as `find_pairs`, minus the
-requirement for a matching mask), loading the checkpoint once and writing one output mask per
-input image into `--out-dir`.
+`predict_tiles` functions to run inference over every image/mask pair found via `find_pairs`
+(same discovery/exclusion/split rule as training - a matching mask is required), loading the
+checkpoint once and writing each predicted mask into a `train`/`validation`/`test` subfolder of
+`--out-dir` matching that image's split (folder names come from `dataset.SPLIT_DIRS`, the shared
+source of truth `evaluate_predictions.py` reads back from). `--tune-threshold` optionally re-tunes
+`train.threshold` first by calling `tools.tune_threshold.find_best_threshold` on `--tune-split`
+(default `val`, never `test`), then applies that single threshold uniformly across every image
+regardless of split - also saving the sweep as a precision-recall curve
+(`--out-dir/threshold_pr_curve.png` via `tools.tune_threshold.plot_pr_curve`, AUC-PR in the
+title). Precision-recall rather than ROC, since fiber masks are sparse/background-dominated and
+ROC-AUC would look misleadingly high under that imbalance - the same reasoning behind using
+dice/iou/tversky over raw pixel accuracy elsewhere.
+
+Every raw prediction is also run through `tools.postprocess_masks.postprocess_mask`
+automatically (classical, non-learned morphological cleanup - no flag to disable it), with the
+processed mask written into a parallel `postprocessed/train`/`validation`/`test` subfolder
+alongside the raw one. Both the raw and processed mask are scored against ground truth
+(`tools.evaluate_predictions.compute_metrics`) into a single `--out-dir/metrics.csv`: each row
+has `raw_*`, `post_*`, and `delta_*` (post minus raw) columns per metric, so neither
+`evaluate_predictions.py` nor `postprocess_masks.py` needs a separate run for a `predict_all.py`
+output (they remain independent standalone entry points for scoring/post-processing predictions
+from elsewhere, e.g. `predict_tiles.py`). `--out-dir/threshold_info.txt` records whether
+threshold tuning was on, the split/metric/step count used if so, the threshold actually applied,
+the post-processing parameters, and the mean per-metric delta.
 
 [export_model.py](fiber_unet_trainer/export_model.py) is an interactive CLI (top-level, not under
 `fiberseg/`) that scans `mlruns/`, `lightning_logs/`, and `.` for `*.ckpt` files, lets you pick one,
 locates the matching config, and exports to TorchScript under `exported_models/`.
 [fiberseg/tools/](fiber_unet_trainer/fiberseg/tools/) has related standalone scripts:
 `export_torchscript.py`, `inspect_checkpoint.py`, `preview_augmentations.py`,
-`evaluate_predictions.py` (per-image metrics CSV vs ground truth), and the performance tooling from
-[IMPROVEMENTS.md](fiber_unet_trainer/IMPROVEMENTS.md): `tune_threshold.py` (sweep `train.threshold`
-on val, no retrain), `rank_uncertainty.py` (active-learning ranking of unlabeled images),
-`compute_dataset_stats.py` (train-split mean/std for `image_normalization: "dataset"`), and
-`extract_micronet_weights.py` (snapshot MicroNet encoder weights so smp can be un-downgraded).
+`evaluate_predictions.py` (per-image metrics CSV vs ground truth), `postprocess_masks.py`
+(classical, non-learned mask cleanup - morphological closing/opening + small-object removal +
+small-hole filling via `postprocess_mask()`, applied to a `predict_all.py`/`predict_tiles.py`
+prediction folder and re-scored against ground truth into its own `metrics.csv`, with a
+before/after mean-metric comparison printed if the raw predictions were already scored), and the
+performance tooling from [IMPROVEMENTS.md](fiber_unet_trainer/IMPROVEMENTS.md):
+`tune_threshold.py` (sweep `train.threshold` on val, no retrain), `rank_uncertainty.py`
+(active-learning ranking of unlabeled images), `compute_dataset_stats.py` (train-split mean/std
+for `image_normalization: "dataset"`), and `extract_micronet_weights.py` (snapshot MicroNet
+encoder weights so smp can be un-downgraded).
 
 ### MLflow
 

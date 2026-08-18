@@ -29,6 +29,13 @@ class Pair:
     split: str
 
 
+# Pair.split value ("train"/"val"/"test") -> output subfolder name, shared by
+# predict_all.py (writes predictions into these) and evaluate_predictions.py (reads
+# them back out). Lives here, not in either of those, so importing it can't create a
+# cycle between the two.
+SPLIT_DIRS = {"train": "train", "val": "validation", "test": "test"}
+
+
 @dataclass(frozen=True)
 class Tile:
     pair: Pair

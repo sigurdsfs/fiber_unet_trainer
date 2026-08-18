@@ -216,10 +216,16 @@ class TrainConfig:
 
     # Metric that drives checkpoint selection, early stopping, and (for
     # reduce_on_plateau) LR scheduling. Any metric logged by the LightningModule
-    # works, e.g. "val/tversky" (default, recall-weighted), "val/dice",
-    # "val/iou". monitor_mode is "max" for quality metrics, "min" for losses.
-    # Choose the metric that matches your downstream scientific target.
-    monitor_metric: str = "val/tversky"
+    # works. Default is "val/soft_tversky" (recall-weighted, threshold-free):
+    # computed from continuous sigmoid probabilities rather than predictions
+    # binarized at `threshold`, so it tracks the same quantity the loss
+    # optimizes and isn't coupled to a threshold value that (per
+    # tools/tune_threshold.py) is meant to be calibrated separately, after
+    # training. "val/tversky"/"val/dice"/"val/iou" (hard, thresholded at
+    # train.threshold) remain available and are still logged every epoch for
+    # deployment-realistic reporting - just not used to drive training control
+    # by default. monitor_mode is "max" for quality metrics, "min" for losses.
+    monitor_metric: str = "val/soft_tversky"
     monitor_mode: str = "max"
 
     # Stochastic Weight Averaging (lightning StochasticWeightAveraging callback).

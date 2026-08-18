@@ -1,0 +1,335 @@
+\documentclass[11pt]{article}
+
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage[colorlinks=true,linkcolor=blue,urlcolor=blue]{hyperref}
+\usepackage{parskip}
+
+\title{Deep-Learning Segmentation of Fibers in SEM Micrographs: Methods}
+\author{}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+We trained a convolutional encoder--decoder network to perform binary semantic
+segmentation of fiber structures in grayscale scanning electron microscopy
+(SEM) images of sampled air-filter deposits. The model is intended to assist
+-- not silently replace -- the manual fiber-counting workflow used in
+occupational asbestos-exposure assessment (filter loading, WHO-criteria fiber
+counts, and airborne concentration / time-weighted-average exposure
+reporting). Training and evaluation are fully config-driven and tracked in
+MLflow, so every number reported below traces back to an exact configuration
+and code state.
+\end{abstract}
+
+\section{Dataset and splits}
+
+The training corpus consists of 298 image/mask pairs of SEM micrographs (one
+image excluded for a missing corresponding mask). Each image is a
+single-channel grayscale micrograph; each mask is a binary image where a
+pixel value greater than zero denotes fiber and zero denotes background. Mask
+files are matched to images by filename pattern (\texttt{\{stem\}\_mask.tif}).
+
+Pairs are split \textbf{by source image}, not by tile, into 70\% train / 15\%
+validation / 15\% test (209 / 45 / 44 images) using a seeded random shuffle
+(seed 42). Splitting by image before tiling is deliberate: it prevents tiles
+from the same source micrograph from leaking across train/validation/test,
+which would otherwise inflate validation/test performance.
+
+\section{Preprocessing and tiling}
+
+\paragraph{Contrast normalization.}
+Each source image is normalized once, at full resolution, by clipping to its
+1st and 99.5th percentile intensity and rescaling to $[0, 1]$. Percentile
+(rather than min--max) normalization is used because SEM images commonly
+contain a small number of very bright outlier pixels (charging artifacts,
+detector saturation) that would otherwise dominate a naive min--max stretch.
+This normalized array is cached to disk (memory-mapped \texttt{.npy}) so
+every tile drawn from a given image shares an identical contrast stretch, and
+the same normalization is applied verbatim at inference time.
+
+\paragraph{Tiling.}
+Each normalized image is decomposed into overlapping square tiles via a
+sliding window (default $512\times512$~px, 384~px stride -- 25\% overlap).
+The final row/column of tiles is snapped to the image edge so the entire
+image is always covered, even when its dimensions are not an exact multiple
+of the stride.
+
+\paragraph{Sparse-mask handling.}
+Fiber pixels are a small minority of total image area, so a large majority
+of naively generated tiles are entirely background. During training (train
+split only), tiles below a minimum foreground fraction (default 0.1\%) are
+randomly kept with a fixed low probability (default 20\%) rather than
+discarded outright -- this reduces the volume of uninformative background
+tiles without eliminating the model's exposure to hard negatives. An
+alternative dynamic mode exists (per-epoch resampling weighted toward the
+model's current hardest negatives, i.e.\ background tiles it currently
+misclassifies) but is not used in the production recipe.
+
+\paragraph{Channel handling and standardization.}
+The single grayscale channel is replicated to 3 channels so it is compatible
+with ImageNet/MicroNet-pretrained encoders. After augmentation, tiles are
+standardized with the ImageNet per-channel mean/std (matching the
+distribution the pretrained encoder was fine-tuned on); this standardization
+is applied identically in the training dataset and in the tiled-inference
+code path.
+
+\section{Data augmentation}
+
+Applied to the training split only (validation/test are unaugmented), via
+Albumentations:
+
+\begin{table}[h]
+\centering
+\begin{tabular}{@{}llc@{}}
+\toprule
+Transform & Parameters & $p$ \\
+\midrule
+Horizontal flip & --- & 0.50 \\
+Vertical flip & --- & 0.50 \\
+$90^\circ$ rotation & --- & 0.50 \\
+Affine & scale 0.75--1.35, translate $\pm5\%$, rotate $\pm15^\circ$ & 0.50 \\
+Brightness/contrast jitter & $\pm0.15$ & 0.40 \\
+Gaussian noise & $\sigma$ 0.02--0.08 (on the $[0,1]$ scale) & 0.30 \\
+Gaussian blur & kernel 3--5 & 0.20 \\
+\bottomrule
+\end{tabular}
+\caption{Training-time augmentation pipeline.}
+\end{table}
+
+The wide affine scale range specifically accounts for fiber pixel-width
+varying with SEM magnification across the source dataset. Output is
+re-clipped to $[0, 1]$ after augmentation, since brightness/noise transforms
+can push values slightly outside the normalized range.
+
+\section{Model architecture}
+
+The segmentation backbone is a U-Net (\texttt{segmentation\_models\_pytorch})
+with a ResNet-50 encoder. Encoder weights are initialized from NASA's
+\textbf{MicroNet} pretrained-microscopy-models corpus -- a domain-specific
+pretraining corpus of microscopy imagery, rather than natural-image ImageNet
+-- under the hypothesis that microscopy-domain pretraining transfers better
+to SEM textures than natural-image pretraining. The training/inference code
+is architecture-agnostic: any \texttt{segmentation\_models\_pytorch} decoder
+family (U-Net, U-Net++, FPN, DeepLabV3+) and encoder is swappable via
+configuration without code changes, and standard ImageNet-pretrained or
+from-scratch encoders are supported as alternatives to MicroNet.
+
+The model outputs a single-channel raw logit map. Any built-in output
+activation (sigmoid/softmax) present in third-party model definitions is
+explicitly stripped, so sigmoid is applied only inside the loss, metric, and
+inference code -- this ``raw logits'' contract is enforced uniformly
+regardless of which backend produced the model.
+
+\section{Loss function}
+
+The loss is a weighted sum of three terms, computed on sigmoid probabilities
+of the raw logits.
+
+\paragraph{(a) Binary cross-entropy.} Standard pixelwise BCE.
+
+\paragraph{(b) Focal Tversky loss.}
+The soft Tversky index is
+
+\begin{equation}
+\mathrm{TI} = \frac{\mathrm{TP} + \varepsilon}{\mathrm{TP} + \alpha\cdot\mathrm{FP} + \beta\cdot\mathrm{FN} + \varepsilon}
+\label{eq:tversky}
+\end{equation}
+
+with TP/FP/FN computed as probability-weighted sums (not binarized),
+$\alpha = 0.3$, $\beta = 0.7$, $\varepsilon = 10^{-7}$. Weighting
+$\beta > \alpha$ penalizes missed fiber pixels (false negatives) roughly
+$2.3\times$ more heavily than false positives -- appropriate given that
+under-segmenting a thin fiber is a more consequential error than mild
+over-segmentation for downstream fiber counting. The focal form,
+
+\begin{equation}
+L_{FT} = (1 - \mathrm{TI})^{\gamma}, \quad \gamma = 0.75
+\label{eq:focal-tversky}
+\end{equation}
+
+additionally up-weights harder (lower-TI) examples during training.
+
+\paragraph{(c) Soft centerline-Dice (clDice) topology term.}
+Weighted 0.3 in the total loss. A differentiable morphological skeleton is
+computed for both the predicted probability map and the ground-truth mask
+via iterative erosion (implemented as negated max-pooling, 5 iterations) and
+re-dilation; clDice is the harmonic mean of (i) the fraction of the
+predicted skeleton that lies inside the true mask and (ii) the fraction of
+the true skeleton that lies inside the predicted mask. This term directly
+rewards connected, unbroken fiber topology, addressing a failure mode of pure
+overlap losses (BCE, Dice, Tversky), which tolerate a single fiber being
+predicted as several disconnected fragments as long as total pixel overlap is
+high.
+
+Total training loss:
+
+\begin{equation}
+L = \mathrm{BCE} + L_{FT} + 0.3\cdot(1 - \mathrm{clDice})
+\label{eq:total-loss}
+\end{equation}
+
+\section{Training procedure}
+
+\begin{itemize}[nosep]
+  \item \textbf{Optimizer:} AdamW, weight decay $10^{-4}$.
+  \item \textbf{Differential learning rate:} base learning rate
+        $2\times10^{-4}$ applied to the randomly-initialized decoder/head;
+        the pretrained encoder receives this rate scaled by 0.1
+        ($2\times10^{-5}$), so the transferred features are fine-tuned
+        gently while the fresh decoder learns quickly.
+  \item \textbf{LR schedule:} \texttt{ReduceLROnPlateau} (factor 0.5,
+        patience 4 epochs) driven by the monitor metric
+        (Section~\ref{sec:monitor}); cosine annealing is supported as an
+        alternative.
+  \item \textbf{Early stopping:} patience 20 epochs, minimum delta
+        $10^{-3}$, on the same monitor metric.
+  \item \textbf{Budget:} up to 400 epochs (early stopping typically halts
+        training well before this ceiling).
+  \item \textbf{Batch size:} 8 tiles of $512\times512$~px.
+\end{itemize}
+
+Stochastic Weight Averaging is supported but disabled in the production
+recipe.
+
+\section{Training-control metric}
+\label{sec:monitor}
+
+Checkpoint selection, early stopping, and LR scheduling are driven by a
+\textbf{threshold-free} validation metric, \texttt{val/soft\_tversky} -- the
+same Tversky formula as Equation~\ref{eq:tversky}, but accumulated as
+probability-weighted TP/FP/FN sums over the \emph{entire} validation epoch
+(not averaged per-batch, which would let empty tiles trivially score near
+zero and deflate the true whole-image score on such sparse masks) and never
+binarized at a threshold. This is a deliberate design choice: it decouples
+training-time model selection from \texttt{train.threshold}, a deployment
+decision that is not yet calibrated during training (see
+Section~\ref{sec:calibration}). Hard, thresholded analogues of every metric
+(\texttt{val/dice}, \texttt{val/tversky}, etc., at the eventual deployment
+threshold) are logged in parallel for human-readable, deployment-realistic
+reporting, but do not drive any training decision.
+
+\section{Post-hoc threshold calibration}
+\label{sec:calibration}
+
+After training, the sigmoid-probability decision threshold is calibrated --
+rather than left at an arbitrary default of 0.5 -- by sweeping it across
+$\sim$99 values evaluated \textbf{only on the validation split} (never test,
+to avoid leakage into the held-out evaluation set) and selecting the value
+that maximizes a chosen metric (Dice by default). A precision--recall curve
+and its AUC are reported for this sweep; precision--recall (rather than ROC)
+is used because fiber masks are strongly background-dominated, and ROC-AUC
+would look misleadingly high under that class imbalance -- the same
+reasoning that motivates using Dice/IoU/Tversky over raw pixel accuracy
+throughout this pipeline. The single resulting threshold is then applied
+uniformly across every split at inference time.
+
+\section{Inference}
+
+Full-resolution images are tiled using the same patch size/stride as
+training, so the effective receptive field and context seen by the model
+matches training exactly. Overlapping tile probabilities are blended with a
+2D Gaussian window (following the nnU-Net sliding-window scheme), which
+down-weights each tile's less-reliable border pixels relative to its center
+and smooths seams between adjacent tiles. Edge tiles are reflect-padded
+(rather than zero-padded) so they are not artificially biased toward
+``background'' by a black border.
+
+Optional $8\times$ dihedral test-time augmentation (TTA) -- every combination
+of flip/$90^\circ$ rotation, each inverse-transformed and
+probability-averaged -- is available as a no-retrain accuracy gain
+(empirically on the order of $+1$--$2$ Dice) at $8\times$ inference cost; it
+is left off during iterative development and enabled only for final reported
+predictions. The final binary mask is the blended probability map
+thresholded at the calibrated value from Section~\ref{sec:calibration}.
+
+\section{Post-processing}
+
+Every predicted mask additionally passes through a fixed, classical
+(non-learned) morphological cleanup, applied in this order:
+
+\begin{enumerate}[nosep]
+  \item Binary closing (disk radius 1) -- run \emph{first} so it can bridge
+        small, genuine gaps in a single fiber before the next step would
+        otherwise mistake the resulting fragments for separate noise specks.
+  \item Binary opening (disabled by default, radius 0) -- available to
+        smooth jagged edges, but disabled because it risks eroding away
+        genuinely thin fibers.
+  \item Removal of connected components $\leq 64$~px.
+  \item Filling of interior holes $\leq 64$~px.
+\end{enumerate}
+
+Both the raw and post-processed masks are scored independently against
+ground truth, and the per-image delta (post $-$ raw) for every metric is
+reported alongside the absolute values, so the contribution of this
+deterministic cleanup stage is always visible rather than assumed.
+
+\section{Evaluation metrics}
+
+For every image, the full confusion matrix (TP/FP/FN/TN, pixelwise) is
+computed against ground truth, from which accuracy, precision, recall,
+specificity, Dice, IoU, Tversky ($\alpha=0.3$, $\beta=0.7$ -- the same
+asymmetric weighting used in the loss, so optimization and reporting stay
+consistent), and F2 (a recall-weighted F-beta score) are derived. Metrics are
+computed identically for raw and post-processed predictions, across every
+split, and written to a single CSV for auditability.
+
+\section{Experiment tracking and reproducibility}
+
+Every training run logs its fully resolved configuration, per-step and final
+metrics, and periodic/best qualitative prediction images to a local MLflow
+tracking server, keyed by experiment name. The entire pipeline -- data
+split, preprocessing, model, loss, training schedule, inference, and
+post-processing -- is defined by one declarative YAML configuration per
+experiment (Table~\ref{tab:config}), so reproducing a reported result
+requires no code changes, only re-running training against the same config.
+
+\section{Application context}
+
+The source SEM images originate from air-filter samples collected for
+occupational asbestos-exposure monitoring. Segmented fiber masks feed
+downstream quantification -- filter loading, WHO-criteria fiber counting,
+and airborne fiber concentration / time-weighted-average exposure
+reporting -- that otherwise relies entirely on manual microscopist counting
+under magnification. The model's intended role is to \textbf{assist and
+accelerate}, not silently replace, that expert workflow: the held-out test
+split has no influence on threshold calibration
+(Section~\ref{sec:calibration}), and companion tooling in the same
+repository supports manual per-image quality review (mask quality, filter
+loading level, and asbestos presence) so segmentation output remains
+auditable against expert judgment before being used in any exposure-limit-
+relevant reporting.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{@{}ll@{}}
+\toprule
+Setting & Value \\
+\midrule
+Architecture / encoder & U-Net, ResNet-50, MicroNet-pretrained \\
+Input channels & 3 (grayscale replicated) \\
+Patch size / stride & 512 / 384 px (25\% overlap) \\
+Batch size & 8 \\
+Split (train/val/test), seed & 70/15/15, seed 42 \\
+Loss & BCE + Focal Tversky ($\alpha$=0.3, $\beta$=0.7, $\gamma$=0.75) + 0.3$\times$clDice (5 iters) \\
+Optimizer & AdamW, lr $2\times10^{-4}$ (decoder) / $2\times10^{-5}$ (encoder), wd $10^{-4}$ \\
+LR schedule & ReduceLROnPlateau, factor 0.5, patience 4 \\
+Early stopping & patience 20, min $\Delta$ $10^{-3}$ \\
+Max epochs & 400 \\
+Monitor metric & \texttt{val/soft\_tversky} (threshold-free, maximize) \\
+Inference blending & Gaussian window, reflect padding \\
+Test-time augmentation & $8\times$ dihedral (final predictions only) \\
+Post-processing & close (r=1) $\rightarrow$ open (r=0, off) $\rightarrow$ remove $\leq$64px $\rightarrow$ fill $\leq$64px \\
+\bottomrule
+\end{tabular}
+\caption{Production configuration.}
+\label{tab:config}
+\end{table}
+
+\end{document}

@@ -27,6 +27,23 @@ def _confusion_counts(
     return tp, fp, fn
 
 
+def _soft_confusion_sums(
+    logits: torch.Tensor,
+    target: torch.Tensor,
+) -> tuple[float, float, float]:
+    """Threshold-free tp/fp/fn pixel-probability sums for one batch (continuous sigmoid
+    output, not binarized), as plain floats so callers can accumulate them across an epoch.
+    Mirrors _confusion_counts but skips the threshold entirely, so the resulting epoch
+    metric (see _stats_from_counts) tracks the same continuous quantity the loss optimizes,
+    independent of any train.threshold value chosen for deployment/reporting."""
+    probs = torch.sigmoid(logits)
+    targ = target.float()
+    tp = (probs * targ).sum().item()
+    fp = (probs * (1.0 - targ)).sum().item()
+    fn = ((1.0 - probs) * targ).sum().item()
+    return tp, fp, fn
+
+
 def _stats_from_counts(
     tp: float,
     fp: float,
@@ -209,6 +226,9 @@ class FiberSegmentationLitModule(pl.LightningModule):
         self._val_tp = 0.0
         self._val_fp = 0.0
         self._val_fn = 0.0
+        self._val_soft_tp = 0.0
+        self._val_soft_fp = 0.0
+        self._val_soft_fn = 0.0
 
     def validation_step(self, batch, batch_idx):
         img, mask = batch
@@ -218,6 +238,10 @@ class FiberSegmentationLitModule(pl.LightningModule):
         self._val_tp += tp
         self._val_fp += fp
         self._val_fn += fn
+        soft_tp, soft_fp, soft_fn = _soft_confusion_sums(logits, mask)
+        self._val_soft_tp += soft_tp
+        self._val_soft_fp += soft_fp
+        self._val_soft_fn += soft_fn
         self.log("val/loss", loss, on_epoch=True, prog_bar=True)
         self.log("val_loss", loss, on_epoch=True)
         return loss
@@ -234,10 +258,29 @@ class FiberSegmentationLitModule(pl.LightningModule):
             self.log(f"val/{k}", v, prog_bar=(k in {"dice", "iou", "tversky"}))
             self.log(f"val_{k}", v)
 
+        # Threshold-free counterparts (see _soft_confusion_sums): track the same
+        # continuous quantity the loss optimizes, so they aren't tied to
+        # train.threshold. These are the recommended default for
+        # monitor_metric (checkpointing/early stopping/LR scheduling) - the hard
+        # `val/*` stats above stay purely diagnostic/reporting at the deployment threshold.
+        soft_stats = _stats_from_counts(
+            self._val_soft_tp,
+            self._val_soft_fp,
+            self._val_soft_fn,
+            self.train_cfg.loss.tversky_alpha,
+            self.train_cfg.loss.tversky_beta,
+        )
+        for k, v in soft_stats.items():
+            self.log(f"val/soft_{k}", v, prog_bar=(k in {"dice", "tversky"}))
+            self.log(f"val_soft_{k}", v)
+
     def on_test_epoch_start(self):
         self._test_tp = 0.0
         self._test_fp = 0.0
         self._test_fn = 0.0
+        self._test_soft_tp = 0.0
+        self._test_soft_fp = 0.0
+        self._test_soft_fn = 0.0
 
     def test_step(self, batch, batch_idx):
         img, mask = batch
@@ -247,6 +290,10 @@ class FiberSegmentationLitModule(pl.LightningModule):
         self._test_tp += tp
         self._test_fp += fp
         self._test_fn += fn
+        soft_tp, soft_fp, soft_fn = _soft_confusion_sums(logits, mask)
+        self._test_soft_tp += soft_tp
+        self._test_soft_fp += soft_fp
+        self._test_soft_fn += soft_fn
         self.log("test/loss", loss, on_epoch=True)
         self.log("test_loss", loss, on_epoch=True)
         return loss
@@ -262,6 +309,17 @@ class FiberSegmentationLitModule(pl.LightningModule):
         for k, v in stats.items():
             self.log(f"test/{k}", v)
             self.log(f"test_{k}", v)
+
+        soft_stats = _stats_from_counts(
+            self._test_soft_tp,
+            self._test_soft_fp,
+            self._test_soft_fn,
+            self.train_cfg.loss.tversky_alpha,
+            self.train_cfg.loss.tversky_beta,
+        )
+        for k, v in soft_stats.items():
+            self.log(f"test/soft_{k}", v)
+            self.log(f"test_soft_{k}", v)
 
     def _build_optimizer(self):
         ratio = self.train_cfg.encoder_lr_ratio

@@ -155,7 +155,7 @@ weights for (e.g. `resnet50`, `se_resnet50`).
 | `accelerator` | str | `"auto"` | `auto`, `gpu`, `cpu` | `auto` picks GPU if available. |
 | `devices` | str or int | `"auto"` | `auto`, int, list | Number/IDs of devices. |
 | `precision` | str | `"32-true"` | `32-true`, `16-mixed`, `bf16-mixed`, `64-true` | On GPU, `32-true` is auto-upgraded to `16-mixed` for speed. `bf16-mixed` on Ampere+ GPUs. |
-| `threshold` | float | `0.5` | `[0, 1]` | Probability cut for a pixel = fiber. Tune post-training with `tools/tune_threshold.py`. |
+| `threshold` | float | `0.5` | `[0, 1]` | Probability cut for a pixel = fiber, used for reporting (`val/tversky` etc.) and inference. Tune post-training with `tools/tune_threshold.py` — not read by the default `monitor_metric` (`val/soft_tversky`), which is threshold-free. |
 | `matmul_precision` | str or null | `"medium"` | `medium`, `high`, `highest`, null | Torch float32 matmul precision (`medium` = fastest with TF32). |
 | `log_every_n_steps` | int | `10` | ≥ 1 | MLflow logging cadence. |
 | `val_check_interval` | float | `1.0` | `(0, 1]` or int | `1.0` = validate once per epoch; `0.5` = twice; int = every N steps. |
@@ -166,8 +166,17 @@ weights for (e.g. `resnet50`, `se_resnet50`).
 
 | Parameter | Type | Default | Values | Notes |
 |---|---|---|---|---|
-| `monitor_metric` | str | `"val/tversky"` | `val/tversky`, `val/dice`, `val/iou`, `val/precision`, `val/recall`, `val/f2`, `val/loss` | Metric driving checkpoint selection, early stopping, and the plateau scheduler. Match your real target. |
+| `monitor_metric` | str | `"val/soft_tversky"` | `val/soft_tversky`, `val/soft_dice`, `val/soft_iou`, `val/soft_precision`, `val/soft_recall`, `val/soft_f2`, `val/tversky`, `val/dice`, `val/iou`, `val/precision`, `val/recall`, `val/f2`, `val/loss` | Metric driving checkpoint selection, early stopping, and the plateau scheduler. Match your real target. |
 | `monitor_mode` | str | `"max"` | `max`, `min` | `max` for quality metrics, `min` for `val/loss`. |
+
+**`soft_*` vs. plain metrics:** the `soft_*` family (`val/soft_tversky`, `val/soft_dice`, ...) is
+computed from continuous sigmoid probabilities, with no binarization — it tracks the same
+continuous quantity `train.loss` optimizes, so LR scheduling/early-stopping/checkpoint selection
+aren't coupled to whatever `train.threshold` happens to be at the time. The plain `val/tversky`,
+`val/dice`, etc. are computed from predictions binarized at `train.threshold` (default `0.5`) —
+useful for deployment-realistic reporting, but not recommended to drive training control since
+`train.threshold` is meant to be calibrated *after* training via `tools/tune_threshold.py`, not
+tuned implicitly during it.
 
 ### Stochastic Weight Averaging — see [IMPROVEMENTS.md §7](IMPROVEMENTS.md)
 
@@ -339,7 +348,7 @@ train:
   max_epochs: 400
   learning_rate: 0.0002
   encoder_lr_ratio: 0.1
-  monitor_metric: "val/tversky"
+  monitor_metric: "val/tversky"  # explicit override; omit to use the default val/soft_tversky
   swa: true
   loss:
     name: "bce_focal_tversky"

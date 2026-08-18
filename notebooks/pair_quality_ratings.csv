@@ -1,0 +1,299 @@
+image,mask_quality,filter_loading,asbestos
+A100 - Site 19.tif,5,low,True
+A100 - Site 20.tif,5,medium,True
+A100 - Site 3.tif,3,low,False
+A104 - Site 17.tif,4,medium,True
+A104 - Site 2.tif,4,high,True
+A104 - Site 22.tif,4,medium,True
+A104 - Site 44.tif,5,low,True
+A104 - Site 5.tif,5,medium,True
+A106 - Site 6.tif,5,low,False
+A110 - Site 29.tif,4,high,True
+A110 - Site 37.tif,4,medium,True
+A112 - 219.tif,1,medium,False
+A112 - 220.tif,2,high,False
+A112 - 221.tif,2,high,True
+A112 - 222.tif,2,high,False
+A112 - 223.tif,2,high,True
+A112 - 224.tif,2,high,False
+A112 - Site 13.tif,3,medium,True
+A112 - Site 2.tif,2,medium,False
+A112 - Site 20.tif,3,low,True
+A112 - Site 21.tif,3,medium,True
+A112 - Site 34.tif,3,medium,True
+A112 - Site 4.tif,4,medium,True
+A112 - Site 46.tif,3,medium,False
+A112 - Site 5.tif,4,medium,True
+A112 - Site 6.tif,0,medium,False
+A112_001.tif,1,high,False
+A112_002.tif,2,high,False
+A112_003.tif,2,medium,False
+A112_004.tif,2,medium,True
+A112_005.tif,2,medium,True
+A112_006.tif,2,medium,False
+A112_007.tif,1,high,False
+A112_008.tif,2,medium,False
+A112_009.tif,3,medium,True
+A112_010.tif,1,medium,False
+A113 - Site 15.tif,4,very low,True
+A124 - Site 12.tif,4,high,True
+A124 - Site 22.tif,4,very high,True
+A125 - Site 10.tif,4,medium,True
+A125 - Site 19.tif,3,medium,True
+A125 - Site 29.tif,4,high,True
+A125 - Site 37.tif,3,high,True
+A125 - Site 4.tif,4,medium,True
+A126 - Site 19.tif,4,low,True
+A126 - Site 4.tif,4,high,True
+A126 - Site 47.tif,3,medium,False
+A126 - Site 48.tif,4,medium,True
+A13 - Site 8.tif,3,high,True
+A139 - Site 18.tif,4,high,True
+A139 - Site 20.tif,4,high,False
+A139 - Site 5.tif,4,high,True
+A140 - Site 11.tif,0,medium,True
+A30_Site1.tif,4,very high,True
+A30_Site2.tif,3,very high,True
+A30_Site3.tif,3,very high,True
+A30_Site4.tif,2,very high,True
+A30_Site5.tif,3,very high,True
+A31_Site1.tif,2,very high,True
+A31_Site2.tif,3,very high,True
+A31_Site3.tif,2,very high,False
+A31_Site4.tif,3,very high,True
+A31_Site5.tif,2,very high,True
+A32 - Site 1.tif,3,very high,True
+A32 - Site 2.tif,1,high,False
+A32 - Site 3.tif,1,high,False
+A32 - Site 4.tif,1,very high,False
+A32 - Site 5.tif,1,very high,False
+A33 - 216.tif,2,very high,True
+A33 - 217.tif,2,very high,True
+A33 - 218.tif,2,very high,True
+A33 - 225.tif,2,very high,True
+A33 - Site 1.tif,2,high,True
+A33 - Site 2.tif,2,high,True
+A33 - Site 3.tif,1,high,False
+A33 - Site 4.tif,2,high,True
+A33 - Site 5.tif,3,high,True
+A33_001.tif,1,high,False
+A33_002.tif,1,high,True
+A33_003.tif,1,very high,True
+A33_004.tif,2,high,True
+A33_005.tif,1,high,False
+A33_10.00kV_0.10nA_22.5nm_500.00ns_006.tif,4,very low,True
+A33_10.00kV_0.10nA_33.7nm_50.00ns_003.tif,3,very low,False
+A33_10.00kV_0.10nA_33.7nm_500.00ns_004.tif,3,low,False
+A33_10.00kV_0.10nA_45.0nm_500.00ns_005.tif,4,very low,False
+A33_10.00kV_0.20nA_42.2nm_50.00ns_007.tif,4,very low,True
+A33_15.00kV_0.20nA_33.7nm_500.00ns_016.tif,4,low,True
+A33_15.00kV_0.20nA_39.7nm_25.00ns_010.tif,4,low,True
+A33_15.00kV_0.20nA_39.7nm_50.00ns_008.tif,4,low,True
+A33_15.00kV_0.20nA_39.7nm_50.00ns_009.tif,4,low,True
+A33_15.00kV_50pA_39.7nm_50.00ns_011.tif,4,low,True
+A33_20.00kV_0.20nA_22.5nm_50.00ns_018.tif,4,low,True
+A33_20.00kV_0.20nA_33.7nm_50.00ns_017.tif,4,low,True
+A33_20.00kV_0.20nA_33.7nm_500.00ns_014.tif,4,low,True
+A33_20.00kV_0.20nA_33.7nm_500.00ns_015.tif,4,low,True
+A33_20.00kV_50pA_39.7nm_25.00ns_013.tif,3,low,True
+A33_20.00kV_50pA_89.9nm_15.00µs_021.tif,4,low,True
+A36 - Site 1.tif,2,high,False
+A36 - Site 2.tif,1,high,False
+A36 - Site 3.tif,2,very high,True
+A36 - Site 4.tif,1,very high,False
+A36 - Site 5.tif,1,very high,False
+A37 - Site 2.tif,2,very high,True
+A37 - Site 3.tif,1,high,False
+A37 - Site 4.tif,1,very high,False
+A37 - Site 5.tif,2,high,True
+A37 - Site 6.tif,2,high,False
+A41 - Site 12.tif,4,very low,True
+A41 - Site 5.tif,5,very low,True
+A44 - Site 13.tif,4,very low,True
+A44 - Site 16.tif,4,very low,True
+A44 - Site 5.tif,5,very low,True
+A44 - Site 8.tif,4,medium,True
+A44_10.00kV_0.10nA_16.9nm_250.00ns_054.tif,3,low,False
+A44_10.00kV_0.10nA_28.1nm_250.00ns_049.tif,4,low,True
+A44_10.00kV_0.10nA_28.1nm_500.00ns_048.tif,4,low,True
+A44_10.00kV_0.10nA_33.7nm_250.00ns_050.tif,4,low,False
+A44_10.00kV_0.10nA_33.7nm_250.00ns_053.tif,4,very low,False
+A44_10.00kV_0.20nA_30.7nm_500.00ns_047.tif,3,low,False
+A44_15.00kV_0.10nA_16.9nm_500.00ns_067.tif,3,low,False
+A44_15.00kV_0.10nA_22.5nm_500.00ns_068.tif,3,low,False
+A44_15.00kV_0.10nA_33.7nm_250.00ns_051.tif,0,very low,False
+A44_15.00kV_0.10nA_33.7nm_250.00ns_052.tif,1,low,False
+A44_15.00kV_0.10nA_37.5nm_750.00ns_062.tif,2,low,True
+A44_15.00kV_0.20nA_45.0nm_250.00ns_060.tif,4,low,True
+A44_15.00kV_0.20nA_45.0nm_750.00ns_061.tif,4,low,True
+A44_15.00kV_0.40nA_45.0nm_250.00ns_059.tif,4,low,False
+A44_15.00kV_50pA_16.9nm_50.00ns_065.tif,3,low,False
+A44_15.00kV_50pA_16.9nm_500.00ns_066.tif,4,low,False
+A44_15.00kV_50pA_37.5nm_50.00ns_064.tif,3,low,False
+A44_15.00kV_50pA_37.5nm_750.00ns_063.tif,4,low,False
+A44_20.00kV_0.10nA_33.7nm_250.00ns_055.tif,1,low,False
+A44_20.00kV_0.40nA_16.9nm_250.00ns_057.tif,3,low,False
+A44_20.00kV_0.40nA_33.7nm_250.00ns_056.tif,3,low,False
+A44_20.00kV_0.40nA_45.0nm_250.00ns_058.tif,4,low,True
+A50 - Site 4.tif,4,low,False
+A51 - Site 11.tif,4,low,True
+A51 - Site 19.tif,4,low,True
+A51 - Site 5.tif,4,low,True
+A51 - Site 9.tif,4,low,True
+A51_10.00kV_0.10nA_14.4nm_50.00ns_086.tif,4,medium,True
+A51_10.00kV_0.10nA_14.4nm_700.00ns_087.tif,4,medium,True
+A51_10.00kV_0.10nA_42.2nm_50.00ns_085.tif,4,medium,True
+A51_10.00kV_0.20nA_14.4nm_700.00ns_088.tif,3,medium,True
+A51_10.00kV_0.40nA_14.4nm_700.00ns_089.tif,4,medium,True
+A51_10.00kV_0.40nA_42.2nm_400.00ns_082.tif,4,medium,True
+A51_10.00kV_0.40nA_42.2nm_50.00ns_083.tif,4,high,True
+A51_10.00kV_50pA_42.2nm_50.00ns_084.tif,4,high,True
+A51_15.00kV_0.10nA_22.5nm_500.00ns_069.tif,3,medium,False
+A51_15.00kV_0.10nA_25.0nm_1.00µs_073.tif,3,medium,True
+A51_15.00kV_0.10nA_25.0nm_500.00ns_072.tif,3,medium,True
+A51_15.00kV_0.20nA_22.5nm_500.00ns_070.tif,2,medium,False
+A51_15.00kV_0.20nA_25.0nm_500.00ns_071.tif,2,medium,False
+A51_15.00kV_50pA_25.0nm_1.00µs_074.tif,2,high,False
+A51_15.00kV_50pA_28.1nm_1.00µs_075.tif,0,very low,False
+A51_15.00kV_50pA_28.1nm_400.00ns_076.tif,3,medium,False
+A51_20.00kV_0.10nA_28.1nm_400.00ns_078.tif,3,medium,True
+A51_20.00kV_0.20nA_28.1nm_400.00ns_079.tif,3,medium,False
+A51_20.00kV_0.40nA_28.1nm_400.00ns_080.tif,3,medium,False
+A51_20.00kV_0.40nA_42.2nm_400.00ns_081.tif,3,medium,False
+A52 - Site 2.tif,5,very low,True
+A52 - Site 3.tif,5,very low,True
+A52 - Site 4.tif,5,very low,True
+A52 - Site 6.tif,1,very low,False
+A52 - Site 9.tif,5,low,True
+A52_10.00kV_0.10nA_16.9nm_200.00ns_031.tif,0,very low,False
+A52_10.00kV_0.10nA_28.1nm_500.00ns_044.tif,4,low,True
+A52_10.00kV_0.10nA_33.7nm_200.00ns_032.tif,4,low,True
+A52_10.00kV_0.20nA_28.1nm_500.00ns_046.tif,4,low,True
+A52_10.00kV_0.40nA_33.7nm_200.00ns_033.tif,4,low,True
+A52_10.00kV_50pA_16.9nm_200.00ns_030.tif,1,low,False
+A52_10.00kV_50pA_33.7nm_200.00ns_029.tif,0,very low,False
+A52_15.00kV_0.10nA_16.9nm_1.00µs_026.tif,4,low,False
+A52_15.00kV_0.10nA_33.7nm_200.00ns_023.tif,0,very low,False
+A52_15.00kV_50pA_33.7nm_1.00µs_028.tif,2,low,False
+A52_20.00kV_0.10nA_28.1nm_500.00ns_043.tif,4,low,True
+A52_20.00kV_0.20nA_28.1nm_25.00ns_040.tif,2,low,False
+A52_20.00kV_0.20nA_28.1nm_25.00ns_041.tif,2,low,False
+A52_20.00kV_0.20nA_28.1nm_500.00ns_042.tif,2,low,False
+A52_20.00kV_0.40nA_16.9nm_200.00ns_035.tif,0,very low,False
+A52_20.00kV_0.40nA_28.1nm_25.00ns_038.tif,4,low,True
+A52_20.00kV_0.40nA_28.1nm_25.00ns_039.tif,4,low,True
+A52_20.00kV_0.40nA_33.7nm_200.00ns_034.tif,2,very low,False
+A52_20.00kV_0.40nA_45.0nm_200.00ns_036.tif,4,low,True
+A52_20.00kV_0.40nA_56.2nm_25.00ns_037.tif,4,low,True
+A53 - Site 2.tif,4,low,True
+A53 - Site 3.tif,3,medium,True
+A53 - Site 6.tif,4,low,True
+A55 - Site 1.tif,1,medium,True
+A55 - Site 2.tif,2,medium,True
+A55 - Site 4.tif,3,medium,True
+A56 - Site 1.tif,4,medium,True
+A56 - Site 2.tif,4,medium,True
+A56 - Site 4.tif,3,low,True
+A56 - Site 5.tif,4,medium,True
+A60 - Site 2.tif,0,very low,False
+A60 - Site 5.tif,0,low,False
+A61 - Site 1.tif,3,medium,True
+A61 - Site 2.tif,3,medium,True
+A61 - Site 3.tif,2,high,False
+A61 - Site 4.tif,1,high,False
+A74 - Site 14.tif,3,low,True
+A74 - Site 15.tif,3,low,True
+A74 - Site 7.tif,2,medium,False
+A74 - Site 8.tif,4,medium,True
+A75 - Site 12.tif,3,medium,False
+A75 - Site 16.tif,3,medium,True
+A75 - Site 2.tif,3,low,True
+A75 - Site 3.tif,3,medium,True
+A75 - Site 7.tif,4,medium,True
+A77 - Site 12.tif,4,low,False
+A77 - Site 18.tif,4,low,True
+A77 - Site 4.tif,4,medium,True
+A77 - Site 5.tif,4,medium,True
+A77 - Site 6 zoom v2.tif,5,low,True
+A77 - Site 6.tif,3,medium,False
+A77 - Site 7.tif,3,medium,True
+A78 - Site 3.tif,5,low,True
+A78 - Site 5.tif,5,low,True
+A78 - Site 8.tif,4,low,True
+A82 - Site 1.tif,4,medium,True
+A82 - Site 2.tif,4,medium,True
+A82 - Site 3.tif,4,medium,True
+A82 - Site 4.tif,4,low,True
+A82 - Site 5.tif,3,medium,True
+A85 - Site 2.tif,5,very low,True
+A86 - Site 2.tif,5,very low,True
+A89 - Site 2.tif,4,low,False
+A89 - Site 3.tif,3,low,False
+A89 - Site 4.tif,3,medium,True
+A89 - Site 5.tif,4,low,True
+A91 - Site 1.tif,5,low,True
+A91 - Site 11.tif,4,medium,True
+A91 - Site 7.tif,4,low,True
+A94 - Site 12.tif,5,high,True
+A94 - Site 14.tif,5,medium,True
+A94 - Site 17.tif,4,very high,True
+A94 - Site 23.tif,5,high,True
+A94 - Site 4.tif,5,medium,True
+A94 - Site 5.tif,5,medium,True
+A94 - Site 9.tif,5,low,True
+A97 - Site 3.tif,5,low,True
+a_E200175-12116-L_11.tif,3,low,False
+a_E200175-12116-L_13.tif,1,very low,False
+a_E200175-12116-L_14.tif,3,very low,False
+a_E200175-12116-L_15.tif,4,low,True
+a_E200175-12116-L_18.tif,1,low,False
+a_E200175-12116-L_19.tif,1,low,False
+a_E200175-12116-L_2.tif,2,low,False
+a_E200175-12116-L_21.tif,1,medium,False
+a_E200175-12116-L_22.tif,4,medium,True
+a_E200175-12116-L_23.tif,2,medium,False
+a_E200175-12116-L_24.tif,3,medium,False
+a_E200175-12116-L_25.tif,3,medium,True
+a_E200175-12116-L_26.tif,2,medium,False
+a_E200175-12116-L_3.tif,1,low,False
+a_E200175-12116-L_4.tif,2,low,False
+a_E200175-12116-L_6.tif,1,low,False
+a_E200175-12116-L_7.tif,0,low,False
+a_E200175-12116-L_8.tif,1,low,False
+b_E200175-12116-L_1.tif,2,medium,False
+b_E200175-12116-L_10.tif,2,medium,False
+b_E200175-12116-L_11.tif,2,medium,False
+b_E200175-12116-L_12.tif,2,medium,False
+b_E200175-12116-L_13.tif,3,medium,True
+b_E200175-12116-L_14.tif,2,medium,False
+b_E200175-12116-L_15.tif,1,medium,False
+b_E200175-12116-L_16.tif,2,medium,False
+b_E200175-12116-L_17.tif,2,medium,False
+b_E200175-12116-L_18.tif,4,medium,True
+b_E200175-12116-L_19.tif,1,medium,False
+b_E200175-12116-L_2.tif,3,medium,False
+b_E200175-12116-L_20.tif,3,medium,True
+b_E200175-12116-L_21.tif,2,medium,False
+b_E200175-12116-L_22.tif,3,low,False
+b_E200175-12116-L_23.tif,3,medium,False
+b_E200175-12116-L_24.tif,4,medium,True
+b_E200175-12116-L_25.tif,3,medium,True
+b_E200175-12116-L_26.tif,1,low,False
+b_E200175-12116-L_27.tif,4,low,False
+b_E200175-12116-L_3.tif,3,medium,False
+b_E200175-12116-L_4.tif,3,high,False
+b_E200175-12116-L_5.tif,3,high,False
+b_E200175-12116-L_6.tif,3,medium,False
+b_E200175-12116-L_7.tif,4,medium,True
+C39 - Site 4.tif,5,medium,True
+SEMS R15B Sample 2_10.00kV_0.10nA_16.9nm_500.00ns_005.tif,5,very low,True
+SEMS R15B Sample 2_10.00kV_0.10nA_33.7nm_1.00µs_002.tif,1,very low,True
+SEMS R15B Sample 2_10.00kV_0.10nA_33.7nm_1.00µs_003.tif,4,very low,True
+SEMS R15B Sample 2_10.00kV_0.10nA_33.7nm_500.00ns_004.tif,4,very low,True
+SEMS R15B Sample 2_20.00kV_0.10nA_15.0nm_500.00ns_018.tif,4,very low,True
+SEMS R15B Sample 2_20.00kV_0.10nA_15.0nm_500.00ns_019.tif,5,very low,True
+SEMS R15B Sample 2_20.00kV_0.10nA_15.0nm_500.00ns_020.tif,4,very low,True
+SEMS R15B Sample 2_20.00kV_0.10nA_15.0nm_500.00ns_021.tif,4,very low,True
+SEMS R15B Sample 2_20.00kV_0.10nA_33.7nm_100.00ns_015.tif,4,low,True
+SEMS R15B Sample 2_20.00kV_0.10nA_33.7nm_500.00ns_017.tif,4,low,True
+SEMS R15B Sample 2_20.00kV_0.10nA_45.0nm_2.00µs_009.tif,4,very low,True

@@ -30,6 +30,7 @@ htmlcov/
 # --- MLflow ---
 mlruns/
 mlartifacts/
+notebooks/mlflow.db
 
 # Stray numeric MLflow experiment-id directories occasionally created at repo root
 /[0-9]*/
