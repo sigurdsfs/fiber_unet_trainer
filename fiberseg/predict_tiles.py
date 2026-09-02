@@ -185,10 +185,29 @@ def predict_mask(
 ) -> np.ndarray:
     """Run tiled inference on a single normalized grayscale image, returning a 0/255 uint8 mask.
 
-    Thin wrapper over `predict_prob` that thresholds at `cfg.train.threshold`.
+    Thin wrapper over `predict_prob` that binarizes it per `cfg.inference.threshold_mode`:
+    `"fixed"` (default) thresholds at `cfg.train.threshold`; `"hysteresis"` instead uses
+    Canny-style two-threshold hysteresis (`cfg.inference.hysteresis_low`/`_high`) so thin
+    low-confidence fibre continuations connected to a confident core survive instead of
+    being severed by a single hard cutoff - see `tools.fiber_gap_repair.hysteresis_threshold_mask`.
     """
     prob = predict_prob(img, model, cfg, device)
-    return (prob > cfg.train.threshold).astype(np.uint8) * 255
+    if cfg.inference.threshold_mode == "hysteresis":
+        # Local import: fiber_gap_repair imports save_mask from this module, so importing
+        # it at module load time would create a circular import.
+        from .tools.fiber_gap_repair import hysteresis_threshold_mask
+
+        mask = hysteresis_threshold_mask(
+            prob, cfg.inference.hysteresis_low, cfg.inference.hysteresis_high
+        )
+    elif cfg.inference.threshold_mode == "fixed":
+        mask = prob > cfg.train.threshold
+    else:
+        raise ValueError(
+            f"Unsupported inference.threshold_mode={cfg.inference.threshold_mode!r}. "
+            "Use 'fixed' or 'hysteresis'."
+        )
+    return mask.astype(np.uint8) * 255
 
 
 def load_predictor(checkpoint: str, cfg: AppConfig) -> tuple[FiberSegmentationLitModule, torch.device]:

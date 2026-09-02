@@ -91,12 +91,20 @@ def _soft_tversky_index(
 def _soft_skeletonize(prob: torch.Tensor, iters: int) -> torch.Tensor:
     """Differentiable morphological skeleton of a soft mask (Shit et al., clDice).
 
-    Repeatedly erodes (min-pool, implemented as -maxpool(-x)) and re-dilates, and
-    accumulates the pixels removed by each erosion step - the medial axis. Fully
-    differentiable (only min/max pooling), so it can sit inside the loss.
+    Repeatedly erodes and re-dilates, and accumulates the pixels removed by each
+    erosion step - the medial axis. Fully differentiable (only min/max pooling),
+    so it can sit inside the loss. Matches the reference implementation
+    (https://github.com/jocpae/clDice/blob/master/cldice_loss/pytorch/soft_skeleton.py):
+    erosion uses a cross/plus-shaped (4-connected) structuring element - the min of
+    a separate 3x1 and 1x3 min-pool - not a full 3x3 square (8-connected). A square
+    erosion requires all 8 neighbors to survive and is more aggressive, which erodes
+    away thin *diagonal* structures (e.g. a diagonally-running fiber) faster across
+    iterations than the cross-shaped erosion the reference uses.
     """
     def _erode(x):
-        return -F.max_pool2d(-x, kernel_size=3, stride=1, padding=1)
+        p1 = -F.max_pool2d(-x, kernel_size=(3, 1), stride=1, padding=(1, 0))
+        p2 = -F.max_pool2d(-x, kernel_size=(1, 3), stride=1, padding=(0, 1))
+        return torch.min(p1, p2)
 
     def _dilate(x):
         return F.max_pool2d(x, kernel_size=3, stride=1, padding=1)
@@ -105,8 +113,10 @@ def _soft_skeletonize(prob: torch.Tensor, iters: int) -> torch.Tensor:
     for _ in range(iters):
         prob = _erode(prob)
         delta = F.relu(prob - _dilate(_erode(prob)))
-        # skel + delta - skel*delta is a soft (probabilistic) union.
-        skel = skel + delta - skel * delta
+        # skel + relu(delta - skel*delta) is a soft (probabilistic) union; the
+        # relu guards against skel drifting slightly above 1 over many
+        # iterations (floating point) and this step going negative.
+        skel = skel + F.relu(delta - skel * delta)
     return skel
 
 

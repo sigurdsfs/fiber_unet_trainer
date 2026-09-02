@@ -29,6 +29,20 @@ FIELDNAMES = [
     "tp", "fp", "fn", "tn",
 ]
 
+# Kept separate from FIELDNAMES (not a compute_metrics() output) so callers
+# that derive a "metric names" list from FIELDNAMES[2:] - predict_all.py and
+# postprocess_masks.py, for their raw_*/post_*/delta_* column expansion -
+# don't pick this up and try to look it up in a metrics dict that doesn't
+# have it. It depends only on the ground-truth mask, not the prediction, so
+# it never gets a raw/post/delta split anyway - just added once per row.
+GT_FRACTION_COLUMN = "GT Foreground Fraction (%)"
+
+
+def gt_foreground_fraction(mask: np.ndarray) -> float:
+    """Percentage of `mask` that is foreground (`mask > 0`, this codebase's
+    convention throughout)."""
+    return 100.0 * float((mask > 0).mean())
+
 
 def compute_metrics(
     pred_mask: np.ndarray,
@@ -119,7 +133,10 @@ def main():
             alpha=cfg.train.loss.tversky_alpha,
             beta=cfg.train.loss.tversky_beta,
         )
-        rows.append({"image": pair.image_path.name, "split": pair.split, **metrics})
+        row = {"image": pair.image_path.name, "split": pair.split}
+        row[GT_FRACTION_COLUMN] = gt_foreground_fraction(gt_mask)
+        row.update(metrics)
+        rows.append(row)
 
     if missing:
         print(
@@ -132,9 +149,10 @@ def main():
             f"No matching prediction files found in {pred_dir} using suffix {args.suffix!r}."
         )
 
+    output_fieldnames = FIELDNAMES[:2] + [GT_FRACTION_COLUMN] + FIELDNAMES[2:]
     out_path = Path(args.out) if args.out else pred_dir / "metrics.csv"
     with open(out_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
+        writer = csv.DictWriter(f, fieldnames=output_fieldnames)
         writer.writeheader()
         writer.writerows(rows)
 

@@ -6,6 +6,10 @@ computes what percentage of pixels are foreground (`mask > 0`, the same conventi
 everywhere else in this codebase). The result is inserted next to the other coverage columns
 ("Median Otsu Coverage (%)" / "Filter Coverage (%)") if either is already present in the CSV,
 so all coverage estimates read side by side.
+
+`evaluate_predictions.py`, `predict_all.py`, and `postprocess_masks.py` now all compute and
+write this same column themselves whenever they build a metrics CSV, so this script is mainly
+useful for backfilling it into a metrics CSV generated before that (or by some other tool).
 """
 from __future__ import annotations
 
@@ -16,8 +20,8 @@ import pandas as pd
 
 from ..config import load_config
 from ..dataset import _read_gray, find_pairs
-
-NEW_COLUMN = "GT Foreground Fraction (%)"
+from .evaluate_predictions import GT_FRACTION_COLUMN as NEW_COLUMN
+from .evaluate_predictions import gt_foreground_fraction
 
 
 def main():
@@ -40,7 +44,7 @@ def main():
     fraction_by_filename: dict[str, float] = {}
     for i, pair in enumerate(pairs, start=1):
         mask = _read_gray(pair.mask_path)
-        fraction = 100.0 * float((mask > 0).mean())
+        fraction = gt_foreground_fraction(mask)
         fraction_by_filename[pair.image_path.name] = fraction
         print(f"[{i}/{len(pairs)}] {pair.image_path.name}: {fraction:.3f}%")
 

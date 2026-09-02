@@ -13,8 +13,8 @@ mlflow:
   run_name: null
 
 data:
-  images_dir: "../Current Training Material - fibers only - Preproc/Images"
-  masks_dir: "../Current Training Material - fibers only - Preproc/Masks"
+  images_dir: "C:/Users/lababr/Desktop/Sigurd/Current Training Material - fibers only - Preproc/Images"
+  masks_dir: "C:/Users/lababr/Desktop/Sigurd/Current Training Material - fibers only - Preproc/Masks"
   image_glob: "*.tif"
   mask_pattern: "{stem}_mask.tif"
   image_channels: 3
@@ -88,6 +88,9 @@ train:
 # Tiled-inference quality (items 3 & 4). tta is off for speed; turn on for final
 # predictions (8x inference cost, no retrain, typically +1-2 dice).
 inference:
+  threshold_mode: str = "fixed"
+  hysteresis_low: float = 0.3
+  hysteresis_high: float = 0.7
   tile_blend: "gaussian"
   reflect_pad: true
   tta: false

@@ -203,6 +203,18 @@ class InferenceConfig:
     # zero training cost. Off by default.
     tta: bool = False
 
+    # How predict_tiles.predict_mask binarizes the probability map:
+    #   "fixed"      -> a single cutoff, train.threshold (previous/default behavior).
+    #   "hysteresis" -> Canny-style two-threshold hysteresis (hysteresis_low/_high):
+    #                   pixels >= hysteresis_high seed confident fibre cores, pixels
+    #                   >= hysteresis_low are kept only where connected to a seed, so
+    #                   thin low-confidence fibre continuations survive instead of
+    #                   being severed by a single hard threshold. See
+    #                   tools/fiber_gap_repair.py's hysteresis_threshold_mask.
+    threshold_mode: str = "fixed"
+    hysteresis_low: float = 0.3
+    hysteresis_high: float = 0.7
+
 
 @dataclass
 class TrainConfig:

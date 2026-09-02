@@ -31,10 +31,10 @@ import statistics
 from datetime import datetime
 from pathlib import Path
 
-from .config import load_config
+from .config import AppConfig, load_config
 from .dataset import SPLIT_DIRS, _normalize_image, _read_gray, find_pairs
 from .predict_tiles import load_predictor, predict_mask, save_mask
-from .tools.evaluate_predictions import FIELDNAMES, compute_metrics
+from .tools.evaluate_predictions import FIELDNAMES, GT_FRACTION_COLUMN, compute_metrics, gt_foreground_fraction
 from .tools.postprocess_masks import postprocess_mask
 from .tools.tune_threshold import find_best_threshold, plot_pr_curve
 
@@ -42,11 +42,190 @@ from .tools.tune_threshold import find_best_threshold, plot_pr_curve
 # minus the leading "image"/"split" columns.
 METRIC_NAMES = FIELDNAMES[2:]
 COMBINED_FIELDNAMES = (
-    ["image", "split"]
+    ["image", "split", GT_FRACTION_COLUMN]
     + [f"raw_{m}" for m in METRIC_NAMES]
     + [f"post_{m}" for m in METRIC_NAMES]
     + [f"delta_{m}" for m in METRIC_NAMES]
 )
+
+
+def run_predict_all(
+    cfg: AppConfig,
+    checkpoint: str | Path,
+    out_dir: str | Path,
+    *,
+    suffix: str = "_pred.tif",
+    tune_threshold: bool = False,
+    tune_split: str = "val",
+    tune_metric: str = "dice",
+    tune_steps: int = 99,
+    closing_radius: int = 1,
+    opening_radius: int = 0,
+    min_object_size: int = 64,
+    max_hole_size: int = 64,
+    config_path: str | Path | None = None,
+) -> dict:
+    """Run tiled prediction on every image/mask pair referenced by `cfg`, writing
+    outputs into train/validation/test subfolders of `out_dir` by split, plus
+    postprocessed/ copies and a combined metrics.csv - the reusable core behind
+    the `python -m fiberseg.predict_all` CLI. Call this directly (e.g. from a
+    notebook, with `cfg = fiberseg.config.load_config(path)`) when you want the
+    results back as Python objects instead of only files + stdout.
+
+    Returns a dict: `rows` (per-image metric dicts, same rows written to
+    metrics.csv), `metrics_path`, `raw_means`/`post_means`/`delta_means`,
+    `threshold` (the value actually used, post-tuning if `tune_threshold` was
+    set), `pr_auc` (None unless `tune_threshold` was set), and `counts`
+    (images per split). `config_path` is purely cosmetic - if given, it's
+    recorded in threshold_info.txt for provenance; omit it when `cfg` wasn't
+    loaded from a file (e.g. built up programmatically in a notebook).
+    """
+    model, device = load_predictor(str(checkpoint), cfg)
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    tune_stats = None
+    pr_auc = None
+    if tune_threshold:
+        best_threshold, tune_stats, tune_thresholds, tune_metrics = find_best_threshold(
+            cfg, model, device,
+            split=tune_split, metric=tune_metric, steps=tune_steps,
+        )
+        print(
+            f"Tuned train.threshold on the {tune_split} split: {best_threshold:.3f} "
+            f"({tune_metric}={tune_stats[tune_metric]:.4f}); using it for all images."
+        )
+        cfg.train.threshold = best_threshold
+
+        pr_curve_path = out_dir / "threshold_pr_curve.png"
+        pr_auc = plot_pr_curve(
+            tune_thresholds, tune_metrics, best_threshold, pr_curve_path,
+            title=f"Precision-recall curve, split={tune_split!r}",
+        )
+        print(f"Wrote precision-recall curve (AUC-PR={pr_auc:.4f}) to {pr_curve_path}")
+
+    pairs = find_pairs(cfg.data)
+
+    split_out_dirs = {split: out_dir / name for split, name in SPLIT_DIRS.items()}
+    postprocessed_out_dirs = {
+        split: out_dir / "postprocessed" / name for split, name in SPLIT_DIRS.items()
+    }
+    for d in list(split_out_dirs.values()) + list(postprocessed_out_dirs.values()):
+        d.mkdir(parents=True, exist_ok=True)
+
+    rows = []
+    for i, pair in enumerate(pairs, start=1):
+        print(f"[{i}/{len(pairs)}] Predicting {pair.image_path.name} ({pair.split}) ...")
+
+        img = _normalize_image(_read_gray(pair.image_path))
+        mask = predict_mask(img, model, cfg, device)
+
+        out_path = split_out_dirs[pair.split] / f"{pair.image_path.stem}{suffix}"
+        save_mask(mask, out_path)
+
+        processed = postprocess_mask(
+            mask,
+            closing_radius=closing_radius,
+            opening_radius=opening_radius,
+            min_object_size=min_object_size,
+            max_hole_size=max_hole_size,
+        )
+        processed_out_path = postprocessed_out_dirs[pair.split] / f"{pair.image_path.stem}{suffix}"
+        save_mask(processed, processed_out_path)
+
+        gt_mask = _read_gray(pair.mask_path)
+        raw_metrics = compute_metrics(
+            mask, gt_mask,
+            alpha=cfg.train.loss.tversky_alpha, beta=cfg.train.loss.tversky_beta,
+        )
+        post_metrics = compute_metrics(
+            processed, gt_mask,
+            alpha=cfg.train.loss.tversky_alpha, beta=cfg.train.loss.tversky_beta,
+        )
+
+        row = {"image": pair.image_path.name, "split": pair.split}
+        row[GT_FRACTION_COLUMN] = gt_foreground_fraction(gt_mask)
+        for m in METRIC_NAMES:
+            row[f"raw_{m}"] = raw_metrics[m]
+            row[f"post_{m}"] = post_metrics[m]
+            row[f"delta_{m}"] = post_metrics[m] - raw_metrics[m]
+        rows.append(row)
+
+    counts = {split: sum(1 for p in pairs if p.split == split) for split in SPLIT_DIRS}
+    print(
+        f"Done. Wrote {len(pairs)} predictions to {out_dir} "
+        f"(train={counts['train']}, validation={counts['val']}, test={counts['test']})"
+    )
+
+    metrics_path = out_dir / "metrics.csv"
+    with open(metrics_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=COMBINED_FIELDNAMES)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    raw_means = {m: statistics.fmean(row[f"raw_{m}"] for row in rows) for m in METRIC_NAMES}
+    post_means = {m: statistics.fmean(row[f"post_{m}"] for row in rows) for m in METRIC_NAMES}
+    delta_means = {m: post_means[m] - raw_means[m] for m in METRIC_NAMES}
+    print(f"Wrote metrics for {len(rows)} images to {metrics_path}")
+    print(
+        "Raw mean metrics:            "
+        + ", ".join(f"{k}={v:.4f}" for k, v in raw_means.items())
+    )
+    print(
+        "Post-processed mean metrics: "
+        + ", ".join(f"{k}={v:.4f}" for k, v in post_means.items())
+    )
+    print(
+        "Mean delta (post - raw):     "
+        + ", ".join(f"{k}={v:+.4f}" for k, v in delta_means.items())
+    )
+
+    info_path = out_dir / "threshold_info.txt"
+    info_lines = [f"Generated: {datetime.now().isoformat(timespec='seconds')}"]
+    if config_path is not None:
+        info_lines.append(f"Config: {config_path}")
+    info_lines += [
+        f"Checkpoint: {checkpoint}",
+        "",
+        f"Threshold tuning: {'ON' if tune_threshold else 'OFF'}",
+    ]
+    if tune_threshold:
+        info_lines += [
+            f"  Tuned on split: {tune_split}",
+            f"  Metric maximized: {tune_metric}",
+            f"  Thresholds swept: {tune_steps}",
+            "  Stats at best threshold: "
+            + ", ".join(f"{k}={v:.4f}" for k, v in tune_stats.items()),
+            f"  Precision-recall AUC: {pr_auc:.4f} (see threshold_pr_curve.png)",
+        ]
+    else:
+        info_lines.append("  (using train.threshold from the config, unchanged)")
+    info_lines += [
+        "",
+        f"Threshold used for all predictions: {cfg.train.threshold:.3f}",
+        f"Images processed: {len(pairs)} "
+        f"(train={counts['train']}, validation={counts['val']}, test={counts['test']})",
+        "",
+        "Post-processing (classical, non-learned): closing_radius="
+        f"{closing_radius}, opening_radius={opening_radius}, "
+        f"min_object_size={min_object_size}, max_hole_size={max_hole_size}",
+        "  Mean delta (post - raw): "
+        + ", ".join(f"{k}={v:+.4f}" for k, v in delta_means.items()),
+    ]
+    info_path.write_text("\n".join(info_lines) + "\n", encoding="utf-8")
+    print(f"Wrote threshold info to {info_path}")
+
+    return {
+        "rows": rows,
+        "metrics_path": metrics_path,
+        "raw_means": raw_means,
+        "post_means": post_means,
+        "delta_means": delta_means,
+        "threshold": cfg.train.threshold,
+        "pr_auc": pr_auc,
+        "counts": counts,
+    }
 
 
 def main():
@@ -112,141 +291,21 @@ def main():
     args = parser.parse_args()
 
     cfg = load_config(args.config)
-    model, device = load_predictor(args.checkpoint, cfg)
-
-    out_dir = Path(args.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    tune_stats = None
-    pr_auc = None
-    if args.tune_threshold:
-        best_threshold, tune_stats, tune_thresholds, tune_metrics = find_best_threshold(
-            cfg, model, device,
-            split=args.tune_split, metric=args.tune_metric, steps=args.tune_steps,
-        )
-        print(
-            f"Tuned train.threshold on the {args.tune_split} split: {best_threshold:.3f} "
-            f"({args.tune_metric}={tune_stats[args.tune_metric]:.4f}); using it for all images."
-        )
-        cfg.train.threshold = best_threshold
-
-        pr_curve_path = out_dir / "threshold_pr_curve.png"
-        pr_auc = plot_pr_curve(
-            tune_thresholds, tune_metrics, best_threshold, pr_curve_path,
-            title=f"Precision-recall curve, split={args.tune_split!r}",
-        )
-        print(f"Wrote precision-recall curve (AUC-PR={pr_auc:.4f}) to {pr_curve_path}")
-
-    pairs = find_pairs(cfg.data)
-
-    split_out_dirs = {split: out_dir / name for split, name in SPLIT_DIRS.items()}
-    postprocessed_out_dirs = {
-        split: out_dir / "postprocessed" / name for split, name in SPLIT_DIRS.items()
-    }
-    for d in list(split_out_dirs.values()) + list(postprocessed_out_dirs.values()):
-        d.mkdir(parents=True, exist_ok=True)
-
-    rows = []
-    for i, pair in enumerate(pairs, start=1):
-        print(f"[{i}/{len(pairs)}] Predicting {pair.image_path.name} ({pair.split}) ...")
-
-        img = _normalize_image(_read_gray(pair.image_path))
-        mask = predict_mask(img, model, cfg, device)
-
-        out_path = split_out_dirs[pair.split] / f"{pair.image_path.stem}{args.suffix}"
-        save_mask(mask, out_path)
-
-        processed = postprocess_mask(
-            mask,
-            closing_radius=args.closing_radius,
-            opening_radius=args.opening_radius,
-            min_object_size=args.min_object_size,
-            max_hole_size=args.max_hole_size,
-        )
-        processed_out_path = (
-            postprocessed_out_dirs[pair.split] / f"{pair.image_path.stem}{args.suffix}"
-        )
-        save_mask(processed, processed_out_path)
-
-        gt_mask = _read_gray(pair.mask_path)
-        raw_metrics = compute_metrics(
-            mask, gt_mask,
-            alpha=cfg.train.loss.tversky_alpha, beta=cfg.train.loss.tversky_beta,
-        )
-        post_metrics = compute_metrics(
-            processed, gt_mask,
-            alpha=cfg.train.loss.tversky_alpha, beta=cfg.train.loss.tversky_beta,
-        )
-
-        row = {"image": pair.image_path.name, "split": pair.split}
-        for m in METRIC_NAMES:
-            row[f"raw_{m}"] = raw_metrics[m]
-            row[f"post_{m}"] = post_metrics[m]
-            row[f"delta_{m}"] = post_metrics[m] - raw_metrics[m]
-        rows.append(row)
-
-    counts = {split: sum(1 for p in pairs if p.split == split) for split in SPLIT_DIRS}
-    print(
-        f"Done. Wrote {len(pairs)} predictions to {out_dir} "
-        f"(train={counts['train']}, validation={counts['val']}, test={counts['test']})"
+    run_predict_all(
+        cfg,
+        args.checkpoint,
+        args.out_dir,
+        suffix=args.suffix,
+        tune_threshold=args.tune_threshold,
+        tune_split=args.tune_split,
+        tune_metric=args.tune_metric,
+        tune_steps=args.tune_steps,
+        closing_radius=args.closing_radius,
+        opening_radius=args.opening_radius,
+        min_object_size=args.min_object_size,
+        max_hole_size=args.max_hole_size,
+        config_path=args.config,
     )
-
-    metrics_path = out_dir / "metrics.csv"
-    with open(metrics_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=COMBINED_FIELDNAMES)
-        writer.writeheader()
-        writer.writerows(rows)
-
-    raw_means = {m: statistics.fmean(row[f"raw_{m}"] for row in rows) for m in METRIC_NAMES}
-    post_means = {m: statistics.fmean(row[f"post_{m}"] for row in rows) for m in METRIC_NAMES}
-    delta_means = {m: post_means[m] - raw_means[m] for m in METRIC_NAMES}
-    print(f"Wrote metrics for {len(rows)} images to {metrics_path}")
-    print(
-        "Raw mean metrics:            "
-        + ", ".join(f"{k}={v:.4f}" for k, v in raw_means.items())
-    )
-    print(
-        "Post-processed mean metrics: "
-        + ", ".join(f"{k}={v:.4f}" for k, v in post_means.items())
-    )
-    print(
-        "Mean delta (post - raw):     "
-        + ", ".join(f"{k}={v:+.4f}" for k, v in delta_means.items())
-    )
-
-    info_path = out_dir / "threshold_info.txt"
-    info_lines = [
-        f"Generated: {datetime.now().isoformat(timespec='seconds')}",
-        f"Config: {args.config}",
-        f"Checkpoint: {args.checkpoint}",
-        "",
-        f"Threshold tuning: {'ON' if args.tune_threshold else 'OFF'}",
-    ]
-    if args.tune_threshold:
-        info_lines += [
-            f"  Tuned on split: {args.tune_split}",
-            f"  Metric maximized: {args.tune_metric}",
-            f"  Thresholds swept: {args.tune_steps}",
-            "  Stats at best threshold: "
-            + ", ".join(f"{k}={v:.4f}" for k, v in tune_stats.items()),
-            f"  Precision-recall AUC: {pr_auc:.4f} (see threshold_pr_curve.png)",
-        ]
-    else:
-        info_lines.append("  (using train.threshold from the config, unchanged)")
-    info_lines += [
-        "",
-        f"Threshold used for all predictions: {cfg.train.threshold:.3f}",
-        f"Images processed: {len(pairs)} "
-        f"(train={counts['train']}, validation={counts['val']}, test={counts['test']})",
-        "",
-        "Post-processing (classical, non-learned): closing_radius="
-        f"{args.closing_radius}, opening_radius={args.opening_radius}, "
-        f"min_object_size={args.min_object_size}, max_hole_size={args.max_hole_size}",
-        "  Mean delta (post - raw): "
-        + ", ".join(f"{k}={v:+.4f}" for k, v in delta_means.items()),
-    ]
-    info_path.write_text("\n".join(info_lines) + "\n", encoding="utf-8")
-    print(f"Wrote threshold info to {info_path}")
 
 
 if __name__ == "__main__":

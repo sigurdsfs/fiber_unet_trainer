@@ -36,7 +36,7 @@ from skimage.morphology import (
 from ..config import load_config
 from ..dataset import SPLIT_DIRS, _read_gray, find_pairs
 from ..predict_tiles import save_mask
-from .evaluate_predictions import FIELDNAMES, compute_metrics
+from .evaluate_predictions import FIELDNAMES, GT_FRACTION_COLUMN, compute_metrics, gt_foreground_fraction
 
 
 def postprocess_mask(
@@ -148,7 +148,10 @@ def main():
             processed, gt_mask,
             alpha=cfg.train.loss.tversky_alpha, beta=cfg.train.loss.tversky_beta,
         )
-        rows.append({"image": pair.image_path.name, "split": pair.split, **metrics})
+        row = {"image": pair.image_path.name, "split": pair.split}
+        row[GT_FRACTION_COLUMN] = gt_foreground_fraction(gt_mask)
+        row.update(metrics)
+        rows.append(row)
 
     if missing:
         print(
@@ -160,9 +163,10 @@ def main():
             f"No matching prediction files found in {pred_dir} using suffix {args.suffix!r}."
         )
 
+    output_fieldnames = FIELDNAMES[:2] + [GT_FRACTION_COLUMN] + FIELDNAMES[2:]
     metrics_path = out_dir / "metrics.csv"
     with open(metrics_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
+        writer = csv.DictWriter(f, fieldnames=output_fieldnames)
         writer.writeheader()
         writer.writerows(rows)
 
