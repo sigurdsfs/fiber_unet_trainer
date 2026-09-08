@@ -58,6 +58,53 @@ def _validate_sampling(data_cfg: dict[str, Any]) -> None:
         raise ValueError("data.hard_negative_fraction must be in [0, 1].")
     if int(data_cfg.get("hard_negative_warmup_epochs", 3)) < 0:
         raise ValueError("data.hard_negative_warmup_epochs must be >= 0.")
+    ratio_final = data_cfg.get("negative_ratio_final")
+    if ratio_final is not None and float(ratio_final) < 0:
+        raise ValueError("data.negative_ratio_final must be >= 0.")
+    if int(data_cfg.get("negative_ratio_anneal_epochs", 0)) < 0:
+        raise ValueError("data.negative_ratio_anneal_epochs must be >= 0.")
+
+
+_VALID_THRESHOLD_MODES = {"fixed", "hysteresis", "ridge"}
+_VALID_RIDGE_METHODS = {"frangi", "sato"}
+_VALID_RIDGE_DEVICES = {"cuda", "cpu"}
+
+
+def _validate_inference(inf_cfg: dict[str, Any]) -> None:
+    mode = inf_cfg.get("threshold_mode", "fixed")
+    if mode not in _VALID_THRESHOLD_MODES:
+        raise ValueError(
+            f"Unknown threshold_mode {mode!r}. Use one of {sorted(_VALID_THRESHOLD_MODES)}."
+        )
+    method = inf_cfg.get("ridge_method", "frangi")
+    if method not in _VALID_RIDGE_METHODS:
+        raise ValueError(
+            f"Unknown ridge_method {method!r}. Use one of {sorted(_VALID_RIDGE_METHODS)}."
+        )
+    device = inf_cfg.get("ridge_device")
+    if device is not None and device not in _VALID_RIDGE_DEVICES:
+        raise ValueError(
+            f"Unknown ridge_device {device!r}. Use one of "
+            f"{sorted(_VALID_RIDGE_DEVICES)}, or null to pick automatically."
+        )
+    if int(inf_cfg.get("batch_size", 8)) < 1:
+        raise ValueError("inference.batch_size must be >= 1.")
+    sigmas = inf_cfg.get("ridge_sigmas")
+    if sigmas is not None:
+        if not sigmas:
+            raise ValueError("inference.ridge_sigmas must not be empty.")
+        if any(float(s) <= 0 for s in sigmas):
+            raise ValueError("inference.ridge_sigmas must all be > 0.")
+
+
+def _validate_loss(loss_cfg: dict[str, Any]) -> None:
+    if float(loss_cfg.get("focal_bce_weight", 0.0)) < 0:
+        raise ValueError("train.loss.focal_bce_weight must be >= 0.")
+    alpha = float(loss_cfg.get("focal_bce_alpha", 0.25))
+    if not 0.0 < alpha < 1.0:
+        raise ValueError("train.loss.focal_bce_alpha must be in (0, 1).")
+    if float(loss_cfg.get("focal_bce_gamma", 2.0)) < 0:
+        raise ValueError("train.loss.focal_bce_gamma must be >= 0.")
 
 
 @dataclass
@@ -104,6 +151,18 @@ class DataConfig:
     # weighting activates, so difficulty estimates have signal first. Ignored for
     # "static" and when hard_negative_fraction == 0.
     hard_negative_warmup_epochs: int = 3
+
+    # "weighted" only: curriculum-anneal negative_ratio from negative_ratio (start)
+    # to negative_ratio_final over negative_ratio_anneal_epochs, so training starts
+    # fiber-rich and ramps toward a more realistic (higher-negative) ratio without
+    # the early-training collapse a high ratio can cause from the outset. Leave
+    # negative_ratio_final null (default) to disable annealing entirely - the
+    # sampler then uses a flat negative_ratio for the whole run, exactly as before.
+    # Epoch length stays constant throughout (fixed at whichever of the two ratios
+    # implies more negatives): epochs before the ramp completes pad the shortfall
+    # by redrawing some positive tiles, rather than shrinking the batch count.
+    negative_ratio_final: float | None = None
+    negative_ratio_anneal_epochs: int = 0
 
     # Directory for precomputed, percentile-normalized full-image caches (.npy).
     # Avoids re-normalizing whole source images on every tile access. Shared across
@@ -166,6 +225,21 @@ class LossConfig:
     cldice_weight: float = 0.0
     cldice_iters: int = 5
 
+    # Focal BCE term. When > 0, an auxiliary per-pixel focal binary cross-entropy
+    # loss (focal_bce_weight * FocalBCE) is ADDED to whichever `name` loss is
+    # selected - independent of it, the same way cldice_weight is. Region losses
+    # (dice/tversky) go near-zero-gradient on tiles the model already predicts
+    # correctly (including confidently-correct empty tiles), so they give a weak
+    # signal against confident false positives on hard-negative tiles. Focal BCE
+    # gives a crisp per-pixel gradient there: focal_bce_gamma down-weights
+    # already-easy/correct pixels so the loss concentrates on hard/wrong ones, and
+    # focal_bce_alpha reweights the positive (fiber) vs negative (background)
+    # pixel class. 0.0 disables the term entirely (default), preserving prior
+    # behavior.
+    focal_bce_weight: float = 0.0
+    focal_bce_alpha: float = 0.25
+    focal_bce_gamma: float = 2.0
+
 
 @dataclass
 class SchedulerConfig:
@@ -200,8 +274,24 @@ class InferenceConfig:
 
     # Test-time augmentation: average sigmoid outputs over the 8 dihedral
     # (flip/rot90) variants of each tile. ~8x inference cost, typically +1-2 dice,
-    # zero training cost. Off by default.
+    # zero training cost. Off by default. The variants are generated and inverted
+    # on the GPU (see predict_tiles._TTA_TRANSFORMS_TORCH), so enabling TTA costs
+    # extra compute but no extra host<->device transfers.
     tta: bool = False
+
+    # Tiles pushed through the model per forward pass. A large image is ~650 tiles
+    # at patch_size 512 / stride 256; batching them amortizes per-launch overhead
+    # and the GPU sync that a batch-of-1 loop pays per tile. Raise it if the GPU is
+    # underused, lower it if inference OOMs (memory scales with batch_size x
+    # patch_size^2, and TTA does not add to it - the variants run sequentially).
+    #
+    # Note this is not bit-for-bit neutral on an Ampere+ GPU: cuDNN selects different
+    # convolution algorithms per batch shape, and with TF32 on (the default) that
+    # moves individual probabilities by up to ~5e-2. Measured effect on the binarized
+    # mask is nil (IoU 1.000000 between batch_size 1 and 8), and forcing
+    # torch.backends.cudnn.allow_tf32 = False makes it exactly reproducible at ~28%
+    # slower - worth doing only if you need bitwise-identical probability maps.
+    batch_size: int = 8
 
     # How predict_tiles.predict_mask binarizes the probability map:
     #   "fixed"      -> a single cutoff, train.threshold (previous/default behavior).
@@ -211,9 +301,29 @@ class InferenceConfig:
     #                   thin low-confidence fibre continuations survive instead of
     #                   being severed by a single hard threshold. See
     #                   tools/fiber_gap_repair.py's hysteresis_threshold_mask.
+    #   "ridge"      -> run a Hessian ridge/vesselness filter (Frangi or Sato) over the
+    #                   probability map FIRST, then threshold that response instead of
+    #                   the raw probabilities. Because the filter scores how ridge-like
+    #                   a neighbourhood is rather than how bright one pixel is, it
+    #                   bridges along-fibre gaps and suppresses blobby false positives,
+    #                   i.e. it builds a less-fragmented mask up front rather than
+    #                   repairing a fragmented one afterwards (see
+    #                   tools/fiber_gap_repair.py's enhance_ridges). Frangi's response
+    #                   is already in [0, 1]; Sato's is not, so ridge_threshold means
+    #                   different things between them - tune it per method.
     threshold_mode: str = "fixed"
     hysteresis_low: float = 0.3
     hysteresis_high: float = 0.7
+
+    # "ridge" mode only. ridge_device selects the enhance_ridges backend: "cuda",
+    # "cpu", or null for "cuda when available". The GPU path is the same filter
+    # (validated in tests/test_gpu_ridges.py) but ~50x faster - a 46 MP Frangi is
+    # ~60 s on CPU versus ~1 s on GPU, which is what makes this mode usable over a
+    # whole dataset rather than a one-off experiment.
+    ridge_method: str = "frangi"
+    ridge_sigmas: list[float] = field(default_factory=lambda: [1.0, 2.0, 3.0])
+    ridge_threshold: float = 0.5
+    ridge_device: str | None = None
 
 
 @dataclass
@@ -376,6 +486,8 @@ def load_config(path: str | Path) -> AppConfig:
 
     _validate_normalization(data_cfg)
     _validate_sampling(data_cfg)
+    _validate_loss((raw.get("train", {}) or {}).get("loss", {}) or {})
+    _validate_inference(raw.get("inference", {}) or {})
 
     return AppConfig(
         data=_dataclass_from_dict(DataConfig, data_cfg, context="data"),

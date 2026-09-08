@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -219,6 +220,65 @@ def _save_split_files(cfg: AppConfig, checkpoint_dir: Path, logger: MLFlowLogger
         pass
 
 
+def _git_sha() -> str:
+    """Short git SHA of the working tree, for run provenance.
+
+    Prefers an explicit GIT_COMMIT (set by CI), else asks git directly. Reports
+    "<sha>-dirty" when the tree has uncommitted changes, since a bare SHA would
+    otherwise imply the run is reproducible from that commit when it is not.
+    """
+    env_sha = os.environ.get("GIT_COMMIT")
+    if env_sha:
+        return env_sha
+    try:
+        root = Path(__file__).resolve().parent.parent
+        sha = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=root, capture_output=True, text=True, timeout=10,
+        )
+        if sha.returncode != 0:
+            return "unknown"
+        dirty = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=root, capture_output=True, text=True, timeout=10,
+        )
+        suffix = "-dirty" if dirty.returncode == 0 and dirty.stdout.strip() else ""
+        return sha.stdout.strip() + suffix
+    except Exception:
+        return "unknown"
+
+
+def _log_run_provenance(cfg: AppConfig, logger: MLFlowLogger | None) -> None:
+    """Record environment/code provenance and the resolved config on the TRAINING run.
+
+    Must go through `logger.experiment` / `logger.run_id` (the same way
+    `_save_split_files` does), NOT the bare `mlflow.log_param` / `mlflow.log_artifact`
+    fluent API. MLFlowLogger drives its run through the client and never sets the
+    fluent global state, so a fluent call here has no active run and no experiment
+    set - MLflow then silently spawns a fresh run in the "Default" experiment and
+    puts these there, orphaned from the metrics. That is exactly what used to
+    happen: every training run left a stray Default-experiment run behind holding
+    this config artifact.
+    """
+    if logger is None:
+        return
+    try:
+        client = logger.experiment
+        run_id = logger.run_id
+        client.log_param(run_id, "python_env", os.environ.get("CONDA_DEFAULT_ENV", "unknown"))
+        client.log_param(run_id, "python_executable", os.environ.get("CONDA_PREFIX", "unknown"))
+        client.log_param(run_id, "git_sha", _git_sha())
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "resolved_config.yaml"
+            with open(path, "w", encoding="utf-8") as f:
+                yaml.safe_dump(to_dict(cfg), f, sort_keys=False)
+            client.log_artifact(run_id, str(path), artifact_path="config")
+    except Exception as exc:
+        # Deliberately noisy: swallowing this silently is what hid the stray-run
+        # bug for the life of the repo.
+        print(f"Warning: could not log run provenance to MLflow: {exc}")
+
+
 def _run_single_training(cfg: AppConfig):
 
     if cfg.train.matmul_precision:
@@ -283,6 +343,11 @@ def _run_single_training(cfg: AppConfig):
     if resume_ckpt:
         print(f"Resuming from checkpoint: {resume_ckpt}")
     logger.log_hyperparams({"checkpoint_dir": str(checkpoint_dir), "resumed_from": resume_ckpt or ""})
+    # The LightningModule only sees model/train (see lit_module.save_hyperparameters),
+    # so without this the data and inference sections never reach MLflow at all -
+    # meaning two runs that differ only in tile_sampling / negative_ratio look
+    # identical in the params table and cannot be told apart after the fact.
+    logger.log_hyperparams({"data": to_dict(cfg.data), "inference": to_dict(cfg.inference)})
     _save_split_files(cfg, checkpoint_dir, logger)
 
     if cfg.data.image_normalization == "dataset":
@@ -409,18 +474,7 @@ def _run_single_training(cfg: AppConfig):
 
     trainer.test(model, datamodule=datamodule, ckpt_path="best")
 
-    try:
-        mlflow.set_tracking_uri(cfg.mlflow.tracking_uri)
-        mlflow.log_param("python_env", os.environ.get("CONDA_DEFAULT_ENV", "unknown"))
-        mlflow.log_param("python_executable", os.environ.get("CONDA_PREFIX", "unknown"))
-        mlflow.log_param("git_sha", os.environ.get("GIT_COMMIT", "unknown"))
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "resolved_config.yaml"
-            with open(path, "w", encoding="utf-8") as f:
-                yaml.safe_dump(to_dict(cfg), f, sort_keys=False)
-            mlflow.log_artifact(str(path), artifact_path="config")
-    except Exception:
-        pass
+    _log_run_provenance(cfg, logger)
 
     if cfg.train.model_export_path:
         best_ckpt = best_checkpoint_callback.best_model_path

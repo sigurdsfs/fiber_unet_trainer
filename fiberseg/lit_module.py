@@ -143,6 +143,27 @@ def _soft_cldice(logits: torch.Tensor, target: torch.Tensor, iters: int, eps: fl
     return 2.0 * tprec * tsens / (tprec + tsens)
 
 
+def _focal_bce_loss(
+    logits: torch.Tensor,
+    target: torch.Tensor,
+    alpha: float,
+    gamma: float,
+    eps: float = 1e-7,
+):
+    """Per-pixel focal binary cross-entropy (Lin et al.).
+
+    Unlike region losses (dice/tversky), which go near-zero-gradient on tiles the
+    model already predicts correctly, this gives a per-pixel gradient that (1-p_t)^gamma
+    concentrates on hard/wrong pixels - including confident false positives on
+    otherwise-correct negative tiles, which region losses barely notice.
+    """
+    target = target.float()
+    probs = torch.sigmoid(logits)
+    pt = torch.where(target > 0.5, probs, 1.0 - probs).clamp(eps, 1.0 - eps)
+    alpha_t = torch.where(target > 0.5, alpha, 1.0 - alpha)
+    return (-alpha_t * (1.0 - pt).pow(gamma) * torch.log(pt)).mean()
+
+
 class FiberSegmentationLitModule(pl.LightningModule):
     def __init__(self, model_cfg: ModelConfig, train_cfg: TrainConfig):
         super().__init__()
@@ -200,6 +221,18 @@ class FiberSegmentationLitModule(pl.LightningModule):
         if weight > 0:
             cldice = _soft_cldice(logits, mask, self.train_cfg.loss.cldice_iters)
             loss = loss + weight * (1.0 - cldice.mean())
+        # Optional focal-BCE term: composes with any base loss above, same pattern
+        # as cldice_weight - gives a crisp per-pixel signal against confident false
+        # positives that region losses alone under-penalize.
+        fb_weight = self.train_cfg.loss.focal_bce_weight
+        if fb_weight > 0:
+            focal_bce = _focal_bce_loss(
+                logits,
+                mask,
+                self.train_cfg.loss.focal_bce_alpha,
+                self.train_cfg.loss.focal_bce_gamma,
+            )
+            loss = loss + fb_weight * focal_bce
         return loss
 
     def training_step(self, batch, batch_idx):

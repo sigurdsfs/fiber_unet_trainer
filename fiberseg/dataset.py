@@ -361,14 +361,30 @@ def _load_or_build_disk_cache(path: Path, cache_dir: Path, tag: str, build_fn) -
     raise AssertionError("unreachable")
 
 
-@lru_cache(maxsize=512)
+# These caches hold OPEN MEMMAPS, not decoded arrays, so their size must be bounded
+# by how much address space/resident memory a worker can afford - not by image count.
+# A normalized image here averages ~100 MB (46 MP float32), so the previous
+# maxsize=512 let a single worker map ~74 GB, i.e. the entire dataset. With
+# persistent_workers and num_workers=4 that is 8 processes each mapping everything,
+# which on a 64 GB box drives the machine into paging and slowed training ~2.5x.
+#
+# Keeping these small is nearly free: the memmap is only a handle, and the ACTUAL
+# data caching is done by the OS page cache (shared across workers), which is the
+# whole reason _load_or_build_disk_cache returns mmap_mode="r". The lru_cache only
+# saves the np.load call, so a small ring is sufficient. Masks are ~3 MB each and
+# can afford a larger ring than the images.
+_IMAGE_MMAP_CACHE_SIZE = 32
+_MASK_MMAP_CACHE_SIZE = 128
+
+
+@lru_cache(maxsize=_IMAGE_MMAP_CACHE_SIZE)
 def _mmap_normalized_image(path_str: str, cache_dir_str: str) -> np.ndarray:
     return _load_or_build_disk_cache(
         Path(path_str), Path(cache_dir_str), "norm", lambda p: _normalize_image(_read_gray(p))
     )
 
 
-@lru_cache(maxsize=512)
+@lru_cache(maxsize=_MASK_MMAP_CACHE_SIZE)
 def _mmap_mask(path_str: str, cache_dir_str: str) -> np.ndarray:
     return _load_or_build_disk_cache(Path(path_str), Path(cache_dir_str), "mask", _read_gray)
 
@@ -533,6 +549,16 @@ class WeightedTileSampler(Sampler):
     `__len__` is constant across epochs (positives + fixed negative count) so
     Lightning's progress bar and step counting stay stable. `update_difficulty`
     is called once per epoch (by HardNegativeMiningCallback) with the losses seen.
+
+    Optionally curriculum-anneals the negative:positive ratio itself from
+    `negative_ratio` (start) to `negative_ratio_final` over
+    `negative_ratio_anneal_epochs`, so training can start fiber-rich and ramp
+    toward a more realistic (higher-negative) ratio. `__len__` still can't
+    change epoch to epoch, so it's fixed at whichever of the two ratios implies
+    more negatives; epochs before the ramp completes pad the shortfall by
+    redrawing some positive tiles (mild, harmless oversampling of the minority
+    class) rather than shrinking the batch. Leaving `negative_ratio_final` unset
+    disables annealing entirely - every epoch then draws the same negative count.
     """
 
     def __init__(
@@ -542,11 +568,17 @@ class WeightedTileSampler(Sampler):
         hard_negative_fraction: float,
         warmup_epochs: int,
         seed: int,
+        negative_ratio_final: float | None = None,
+        negative_ratio_anneal_epochs: int = 0,
     ):
         flags = np.asarray(is_positive, dtype=bool)
         self.pos = np.flatnonzero(flags)
         self.neg = np.flatnonzero(~flags)
-        self.negative_ratio = float(negative_ratio)
+        self.ratio_start = float(negative_ratio)
+        self.ratio_final = (
+            float(negative_ratio_final) if negative_ratio_final is not None else self.ratio_start
+        )
+        self.anneal_epochs = int(negative_ratio_anneal_epochs)
         self.hard_fraction = float(hard_negative_fraction)
         self.warmup_epochs = int(warmup_epochs)
         self.seed = int(seed)
@@ -554,21 +586,30 @@ class WeightedTileSampler(Sampler):
         # Per-tile difficulty (training loss); 1.0 until observed so unseen tiles
         # start with uniform weight.
         self.difficulty = np.ones(flags.shape[0], dtype=np.float64)
-        self._n_neg = self._negatives_per_epoch()
+        # Fixed epoch length, at whichever ratio implies more negatives.
+        self._n_neg = max(
+            self._negatives_for_ratio(self.ratio_start),
+            self._negatives_for_ratio(self.ratio_final),
+        )
 
-    def _negatives_per_epoch(self) -> int:
+    def _negatives_for_ratio(self, ratio: float) -> int:
         if self.pos.size == 0:
             # Degenerate split with no positive tiles: fall back to all negatives.
             return self.neg.size
-        want = int(round(self.negative_ratio * self.pos.size))
+        want = int(round(ratio * self.pos.size))
         return min(self.neg.size, want)
+
+    def _current_ratio(self) -> float:
+        if self.anneal_epochs <= 0:
+            return self.ratio_final
+        t = min(1.0, self.epoch / self.anneal_epochs)
+        return self.ratio_start + t * (self.ratio_final - self.ratio_start)
 
     def update_difficulty(self, indices: np.ndarray, losses: np.ndarray) -> None:
         """Record the latest per-tile training loss (used to weight hard negatives)."""
         self.difficulty[indices] = losses
 
-    def _draw_negatives(self, rng: np.random.Generator) -> np.ndarray:
-        n = self._n_neg
+    def _draw_negatives(self, n: int, rng: np.random.Generator) -> np.ndarray:
         if n == 0 or self.neg.size == 0:
             return np.empty(0, dtype=np.int64)
 
@@ -587,7 +628,16 @@ class WeightedTileSampler(Sampler):
 
     def __iter__(self):
         rng = np.random.default_rng(self.seed + self.epoch)
-        order = np.concatenate([self.pos, self._draw_negatives(rng)])
+        n_neg_now = min(self._n_neg, self._negatives_for_ratio(self._current_ratio()))
+        neg_idx = self._draw_negatives(n_neg_now, rng)
+
+        pad = self._n_neg - n_neg_now
+        if pad > 0 and self.pos.size > 0:
+            pos_idx = np.concatenate([self.pos, rng.choice(self.pos, size=pad, replace=True)])
+        else:
+            pos_idx = self.pos
+
+        order = np.concatenate([pos_idx, neg_idx])
         rng.shuffle(order)
         self.epoch += 1
         return iter(order.tolist())
@@ -628,6 +678,8 @@ class FiberDataModule(pl.LightningDataModule):
                     hard_negative_fraction=self.cfg.hard_negative_fraction,
                     warmup_epochs=self.cfg.hard_negative_warmup_epochs,
                     seed=self.cfg.seed,
+                    negative_ratio_final=self.cfg.negative_ratio_final,
+                    negative_ratio_anneal_epochs=self.cfg.negative_ratio_anneal_epochs,
                 )
 
         if stage in (None, "test"):

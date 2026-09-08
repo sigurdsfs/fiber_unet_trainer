@@ -1,4 +1,14 @@
 # fiberseg/tools/export_torchscript.py
+"""Export a trained Lightning checkpoint to a standalone TorchScript model package.
+
+By default, the exported `model_config.yaml`'s `inference.threshold` is a straight
+passthrough of the training config's `train.threshold` - NOT re-optimized. Pass
+`--tune-threshold` to sweep it on `--tune-split` first (via `tools.tune_threshold.
+find_best_threshold`, same mechanism as `predict_all.py --tune-threshold`) and export
+that value instead; a `threshold_pr_curve.png` is written alongside the model, and the
+`threshold_tuning` section of model_config.yaml records whether tuning ran and the
+stats at the chosen threshold.
+"""
 from __future__ import annotations
 
 import argparse
@@ -11,9 +21,20 @@ import yaml
 from ..config import load_config, to_dict
 from ..dataset import _hw
 from ..lit_module import FiberSegmentationLitModule
+from .tune_threshold import find_best_threshold, plot_pr_curve
 
 
-def _make_export_config(cfg, *, model_name: str, checkpoint_path: str) -> dict[str, Any]:
+def _make_export_config(
+    cfg,
+    *,
+    model_name: str,
+    checkpoint_path: str,
+    tune_threshold: bool = False,
+    tune_split: str | None = None,
+    tune_metric: str | None = None,
+    tune_steps: int | None = None,
+    tune_stats: dict[str, float] | None = None,
+) -> dict[str, Any]:
     patch_h, patch_w = _hw(cfg.data.patch_size)
     stride_h, stride_w = _hw(cfg.data.stride or cfg.data.patch_size)
 
@@ -53,6 +74,13 @@ def _make_export_config(cfg, *, model_name: str, checkpoint_path: str) -> dict[s
                 "from this already-normalized image, not normalized individually."
             ),
         },
+        "threshold_tuning": {
+            "tuned": bool(tune_threshold),
+            "split": tune_split if tune_threshold else None,
+            "metric": tune_metric if tune_threshold else None,
+            "steps": tune_steps if tune_threshold else None,
+            "stats_at_best": tune_stats if tune_threshold else None,
+        },
         "training_config_snapshot": to_dict(cfg),
     }
 
@@ -65,6 +93,10 @@ def export_torchscript(
     model_name: str,
     device_name: str = "cpu",
     verify: bool = True,
+    tune_threshold: bool = False,
+    tune_split: str = "val",
+    tune_metric: str = "dice",
+    tune_steps: int = 99,
 ) -> None:
     config_path = Path(config_path)
     checkpoint_path = Path(checkpoint_path)
@@ -94,6 +126,25 @@ def export_torchscript(
     lit_model.eval()
     lit_model.to(device)
 
+    tune_stats = None
+    if tune_threshold:
+        best_threshold, tune_stats, tune_thresholds, tune_metrics = find_best_threshold(
+            cfg, lit_model, device,
+            split=tune_split, metric=tune_metric, steps=tune_steps,
+        )
+        print(
+            f"Tuned train.threshold on the {tune_split} split: {best_threshold:.3f} "
+            f"({tune_metric}={tune_stats[tune_metric]:.4f})."
+        )
+        cfg.train.threshold = best_threshold
+
+        pr_curve_path = out_dir / "threshold_pr_curve.png"
+        pr_auc = plot_pr_curve(
+            tune_thresholds, tune_metrics, best_threshold, pr_curve_path,
+            title=f"Precision-recall curve, split={tune_split!r}",
+        )
+        print(f"Wrote precision-recall curve (AUC-PR={pr_auc:.4f}) to {pr_curve_path}")
+
     model = lit_model.model
     model.eval()
     model.to(device)
@@ -117,6 +168,11 @@ def export_torchscript(
         cfg,
         model_name=model_name,
         checkpoint_path=str(checkpoint_path),
+        tune_threshold=tune_threshold,
+        tune_split=tune_split,
+        tune_metric=tune_metric,
+        tune_steps=tune_steps,
+        tune_stats=tune_stats,
     )
 
     with open(config_out_path, "w", encoding="utf-8") as f:
@@ -172,6 +228,32 @@ def main() -> None:
         action="store_true",
         help="Skip loading the exported model and comparing outputs.",
     )
+    parser.add_argument(
+        "--tune-threshold",
+        action="store_true",
+        help="Re-tune train.threshold on --tune-split before exporting, so the exported "
+        "model_config.yaml records the tuned value instead of the training config's as-is "
+        "train.threshold.",
+    )
+    parser.add_argument(
+        "--tune-split",
+        default="val",
+        choices=["train", "val", "test"],
+        help="Split to tune train.threshold on when --tune-threshold is set (default: val; "
+        "never tune on test for reporting).",
+    )
+    parser.add_argument(
+        "--tune-metric",
+        default="dice",
+        choices=["dice", "iou", "f2", "tversky"],
+        help="Metric to maximize when --tune-threshold is set (default: dice).",
+    )
+    parser.add_argument(
+        "--tune-steps",
+        type=int,
+        default=99,
+        help="Thresholds tried in (0,1) when --tune-threshold is set (default: 99).",
+    )
 
     args = parser.parse_args()
 
@@ -182,6 +264,10 @@ def main() -> None:
         model_name=args.model_name,
         device_name=args.device,
         verify=not args.no_verify,
+        tune_threshold=args.tune_threshold,
+        tune_split=args.tune_split,
+        tune_metric=args.tune_metric,
+        tune_steps=args.tune_steps,
     )
 
 

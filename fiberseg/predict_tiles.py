@@ -79,6 +79,49 @@ def _make_model_input(
     return torch.from_numpy(np.ascontiguousarray(tile)).float().unsqueeze(0).to(device)
 
 
+# Torch equivalents of _TTA_TRANSFORMS, applied to the trailing (H, W) dims so they
+# work on a whole (N, C, H, W) batch at once. Keeping TTA on the GPU avoids the
+# 8x host<->device round trip and the ~24 full-tile numpy copies per tile that the
+# numpy path costs; `tests/test_improvements.py` pins that both sets agree.
+_TTA_TRANSFORMS_TORCH = [
+    (lambda t: t, lambda t: t),
+    (lambda t: torch.rot90(t, 1, (-2, -1)), lambda t: torch.rot90(t, -1, (-2, -1))),
+    (lambda t: torch.rot90(t, 2, (-2, -1)), lambda t: torch.rot90(t, -2, (-2, -1))),
+    (lambda t: torch.rot90(t, 3, (-2, -1)), lambda t: torch.rot90(t, -3, (-2, -1))),
+    (lambda t: torch.flip(t, (-1,)), lambda t: torch.flip(t, (-1,))),
+    (lambda t: torch.flip(t, (-2,)), lambda t: torch.flip(t, (-2,))),
+    (lambda t: torch.rot90(torch.flip(t, (-1,)), 1, (-2, -1)),
+     lambda t: torch.flip(torch.rot90(t, -1, (-2, -1)), (-1,))),
+    (lambda t: torch.rot90(torch.flip(t, (-1,)), 3, (-2, -1)),
+     lambda t: torch.flip(torch.rot90(t, -3, (-2, -1)), (-1,))),
+]
+
+
+def _infer_batch_prob(
+    batch: torch.Tensor,
+    model: FiberSegmentationLitModule,
+    cfg: AppConfig,
+) -> torch.Tensor:
+    """Sigmoid probabilities for a (N, C, H, W) batch of tiles, optionally TTA-averaged.
+
+    Returns an (N, H, W) tensor that stays on the model's device - the caller blends it
+    into a device-resident accumulator, so a whole image costs one device->host copy
+    instead of one per tile.
+    """
+    if not cfg.inference.tta:
+        return torch.sigmoid(model(batch))[:, 0]
+
+    acc = torch.zeros(
+        (batch.shape[0], batch.shape[2], batch.shape[3]),
+        dtype=torch.float32,
+        device=batch.device,
+    )
+    for forward, inverse in _TTA_TRANSFORMS_TORCH:
+        out = torch.sigmoid(model(forward(batch).contiguous()))[:, 0]
+        acc += inverse(out)
+    return acc / len(_TTA_TRANSFORMS_TORCH)
+
+
 def _infer_tile_prob(
     tile: np.ndarray,
     model: FiberSegmentationLitModule,
@@ -124,8 +167,11 @@ def predict_prob(
 
     H, W = img.shape[:2]
 
-    prob = np.zeros((H, W), dtype=np.float32)
-    weight = np.zeros((H, W), dtype=np.float32)
+    # Accumulate on the model's device: at 46 MP these two buffers are ~370 MB total,
+    # and keeping them here means the per-tile blend is a GPU op and the whole image
+    # costs a single device->host transfer at the end.
+    prob = torch.zeros((H, W), dtype=torch.float32, device=device)
+    weight = torch.zeros((H, W), dtype=torch.float32, device=device)
 
     if cfg.inference.tile_blend == "gaussian":
         window = _gaussian_window(patch_h, patch_w)
@@ -147,9 +193,16 @@ def predict_prob(
     if xs[-1] != max(0, W - patch_w):
         xs.append(max(0, W - patch_w))
 
+    window_t = torch.from_numpy(window).to(device)
+    coords = [(y, x) for y in ys for x in xs]
+    batch_size = max(1, int(cfg.inference.batch_size))
+
     with torch.no_grad():
-        for y in ys:
-            for x in xs:
+        for start in range(0, len(coords), batch_size):
+            chunk = coords[start:start + batch_size]
+
+            inputs = []
+            for y, x in chunk:
                 tile = img[y:y+patch_h, x:x+patch_w]
 
                 pad_h = patch_h - tile.shape[0]
@@ -164,17 +217,29 @@ def predict_prob(
                     kwargs = {"constant_values": 0} if mode == "constant" else {}
                     tile = np.pad(tile, ((0, pad_h), (0, pad_w)), mode=mode, **kwargs)
 
-                p = _infer_tile_prob(tile, model, cfg, device)
+                # _make_model_input returns (1, C, h, w); concatenate into one batch so
+                # the model runs once per `batch_size` tiles instead of once per tile.
+                inputs.append(
+                    _make_model_input(
+                        tile,
+                        cfg.data.image_channels,
+                        cfg.data.image_normalization,
+                        device,
+                        cfg.data.norm_mean,
+                        cfg.data.norm_std,
+                    )
+                )
 
+            probs = _infer_batch_prob(torch.cat(inputs, dim=0), model, cfg)
+
+            for i, (y, x) in enumerate(chunk):
                 valid_h = min(patch_h, H - y)
                 valid_w = min(patch_w, W - x)
-                p = p[:valid_h, :valid_w]
-                win = window[:valid_h, :valid_w]
-
-                prob[y:y+valid_h, x:x+valid_w] += p * win
+                win = window_t[:valid_h, :valid_w]
+                prob[y:y+valid_h, x:x+valid_w] += probs[i, :valid_h, :valid_w] * win
                 weight[y:y+valid_h, x:x+valid_w] += win
 
-    return prob / np.maximum(weight, 1e-8)
+    return (prob / weight.clamp(min=1e-8)).cpu().numpy()
 
 
 def predict_mask(
@@ -189,10 +254,14 @@ def predict_mask(
     `"fixed"` (default) thresholds at `cfg.train.threshold`; `"hysteresis"` instead uses
     Canny-style two-threshold hysteresis (`cfg.inference.hysteresis_low`/`_high`) so thin
     low-confidence fibre continuations connected to a confident core survive instead of
-    being severed by a single hard cutoff - see `tools.fiber_gap_repair.hysteresis_threshold_mask`.
+    being severed by a single hard cutoff - see `tools.fiber_gap_repair.hysteresis_threshold_mask`;
+    `"ridge"` first runs a Hessian ridge filter (`tools.fiber_gap_repair.enhance_ridges`)
+    over the probability map and thresholds that response at `cfg.inference.ridge_threshold`,
+    scoring how ridge-like a neighbourhood is rather than how bright a single pixel is.
     """
     prob = predict_prob(img, model, cfg, device)
-    if cfg.inference.threshold_mode == "hysteresis":
+    mode = cfg.inference.threshold_mode
+    if mode == "hysteresis":
         # Local import: fiber_gap_repair imports save_mask from this module, so importing
         # it at module load time would create a circular import.
         from .tools.fiber_gap_repair import hysteresis_threshold_mask
@@ -200,12 +269,22 @@ def predict_mask(
         mask = hysteresis_threshold_mask(
             prob, cfg.inference.hysteresis_low, cfg.inference.hysteresis_high
         )
-    elif cfg.inference.threshold_mode == "fixed":
+    elif mode == "ridge":
+        from .tools.fiber_gap_repair import enhance_ridges
+
+        ridge = enhance_ridges(
+            prob,
+            method=cfg.inference.ridge_method,
+            sigmas=tuple(cfg.inference.ridge_sigmas),
+            device=cfg.inference.ridge_device,
+        )
+        mask = ridge > cfg.inference.ridge_threshold
+    elif mode == "fixed":
         mask = prob > cfg.train.threshold
     else:
         raise ValueError(
-            f"Unsupported inference.threshold_mode={cfg.inference.threshold_mode!r}. "
-            "Use 'fixed' or 'hysteresis'."
+            f"Unsupported inference.threshold_mode={mode!r}. "
+            "Use 'fixed', 'hysteresis' or 'ridge'."
         )
     return mask.astype(np.uint8) * 255
 

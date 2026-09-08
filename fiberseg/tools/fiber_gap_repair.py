@@ -57,11 +57,14 @@ from __future__ import annotations
 
 import argparse
 import csv
+import math
 import statistics
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+import torch
+import torch.nn.functional as F
 from skimage.draw import line as draw_line
 from skimage.filters import apply_hysteresis_threshold, frangi, sato
 from skimage.graph import route_through_array
@@ -110,11 +113,148 @@ def hysteresis_threshold_mask(probability: np.ndarray, low: float, high: float) 
 # ---------------------------------------------------------------------------
 
 
+def _gaussian_kernel1d(
+    sigma: float, order: int, radius: int, dtype, device
+) -> "torch.Tensor":
+    """1D Gaussian (or its first derivative), matching `scipy.ndimage`'s kernel.
+
+    Mirrors `scipy.ndimage._gaussian_kernel1d` for orders 0 and 1, which is all
+    `_hessian_matrix_with_gaussian` needs (it builds second derivatives from two
+    successive first-order passes).
+    """
+    x = torch.arange(-radius, radius + 1, dtype=dtype, device=device)
+    phi = torch.exp(-0.5 / (sigma * sigma) * x * x)
+    phi = phi / phi.sum()
+    if order == 0:
+        return phi
+    if order == 1:
+        return (-x / (sigma * sigma)) * phi
+    raise ValueError(f"Unsupported derivative order: {order}")
+
+
+def _symmetric_index(n: int, radius: int, device) -> "torch.Tensor":
+    """Indices realizing scipy's `mode="reflect"` padding of a length-`n` axis.
+
+    The pattern (d c b a | a b c d | d c b a) duplicates the edge sample and is
+    periodic with period 2n, so folding the padded coordinate into [0, 2n) and
+    mirroring the upper half handles ANY radius - including radii larger than the
+    axis itself, which happens routinely here: sigma <= 1 uses truncate=100, giving
+    a radius of 71 that exceeds a small tile or crop.
+    """
+    i = torch.arange(-radius, n + radius, device=device)
+    period = 2 * n
+    j = torch.remainder(i, period)
+    return torch.where(j < n, j, period - 1 - j)
+
+
+def _pad_symmetric(x: "torch.Tensor", ry: int, rx: int) -> "torch.Tensor":
+    """Symmetric edge padding, i.e. scipy.ndimage's `mode="reflect"`.
+
+    Note the naming clash: scipy's "reflect" duplicates the edge sample
+    (d c b a | a b c d), which torch calls "symmetric"; torch's own "reflect" is
+    scipy's "mirror", and `F.pad` refuses radii >= the dimension either way. Hence
+    the explicit gather.
+    """
+    if ry:
+        idx = _symmetric_index(x.shape[2], ry, x.device)
+        x = x.index_select(2, idx)
+    if rx:
+        idx = _symmetric_index(x.shape[3], rx, x.device)
+        x = x.index_select(3, idx)
+    return x
+
+
+def _separable_filter(img: "torch.Tensor", ky: "torch.Tensor", kx: "torch.Tensor"):
+    """Convolve (1,1,H,W) with the separable kernel ky (rows) x kx (cols).
+
+    `F.conv2d` correlates rather than convolves, so the kernels are flipped to
+    match scipy's convolution convention.
+    """
+    ry = (ky.numel() - 1) // 2
+    rx = (kx.numel() - 1) // 2
+    out = _pad_symmetric(img, ry, rx)
+    out = F.conv2d(out, torch.flip(ky, (0,)).view(1, 1, -1, 1))
+    out = F.conv2d(out, torch.flip(kx, (0,)).view(1, 1, 1, -1))
+    return out
+
+
+def _hessian_torch(img: "torch.Tensor", sigma: float):
+    """Hessian components (Hrr, Hrc, Hcc) matching skimage's
+    `hessian_matrix(..., use_gaussian_derivatives=True, mode="reflect")`.
+
+    Like skimage, this applies two successive FIRST-order Gaussian derivative
+    passes at sigma/sqrt(2) rather than one second-order pass, and uses the same
+    (large) truncation radius - `truncate=8`, widened to 100 for sigma <= 1 where
+    the discrete Gaussian derivative decays too slowly to truncate early.
+    """
+    truncate = 8 if sigma > 1 else 100
+    s = (1.0 / math.sqrt(2.0)) * sigma
+    radius = int(truncate * s + 0.5)
+    k0 = _gaussian_kernel1d(s, 0, radius, img.dtype, img.device)
+    k1 = _gaussian_kernel1d(s, 1, radius, img.dtype, img.device)
+
+    grad_r = _separable_filter(img, k1, k0)
+    grad_c = _separable_filter(img, k0, k1)
+    hrr = _separable_filter(grad_r, k1, k0)
+    hrc = _separable_filter(grad_r, k0, k1)
+    hcc = _separable_filter(grad_c, k0, k1)
+    return hrr, hrc, hcc
+
+
+def _ridge_torch(
+    img: "torch.Tensor",
+    *,
+    method: str,
+    sigmas: tuple[float, ...],
+    alpha: float = 0.5,
+    beta: float = 0.5,
+) -> "torch.Tensor":
+    """GPU/torch port of `skimage.filters.frangi`/`sato` with `black_ridges=False`.
+
+    Numerically equivalent to skimage (validated to ~1e-15 in float64 and ~3e-7 in
+    float32 - see tests/test_gpu_ridges.py), just evaluated with torch so it can run
+    on the GPU. The eigenvalues of the symmetric 2x2 Hessian are taken analytically
+    instead of via `hessian_matrix_eigvals`.
+    """
+    img = -img  # both filters normalize to black ridges first
+    out = torch.zeros_like(img)
+    gamma = None
+
+    for sigma in sigmas:
+        hrr, hrc, hcc = _hessian_torch(img, sigma)
+        half_trace = (hrr + hcc) / 2
+        delta = torch.sqrt(torch.clamp(((hrr - hcc) / 2) ** 2 + hrc ** 2, min=0))
+        big = half_trace + delta      # larger eigenvalue
+        small = half_trace - delta    # smaller eigenvalue
+
+        if method == "sato":
+            # skimage keeps eigenvalues in DECREASING order and drops the last,
+            # which in 2D leaves just the largest, clipped at 0 and scaled.
+            vals = (sigma ** 2) * torch.clamp(big, min=0)
+        else:
+            # frangi sorts by MAGNITUDE: lambda1 is the smaller-|.| eigenvalue.
+            swap = big.abs() > small.abs()
+            lam1 = torch.where(swap, small, big)
+            lam2 = torch.where(swap, big, small)
+            # Clipping lambda2 at 1e-10 is what makes the blobness term underflow
+            # to 0 for wrong-signed eigenvalues - same trick skimage relies on.
+            r_b = lam1.abs() / torch.clamp(lam2, min=1e-10)
+            s = torch.sqrt(lam1 ** 2 + lam2 ** 2)
+            if gamma is None:
+                # skimage computes gamma once, on the FIRST scale, and reuses it.
+                gamma = float(s.max()) / 2 or 1.0
+            vals = torch.exp(-(r_b ** 2) / (2 * beta ** 2))
+            vals = vals * (1.0 - torch.exp(-(s ** 2) / (2 * gamma * gamma)))
+        out = torch.maximum(out, vals)
+    return out
+
+
 def enhance_ridges(
     image: np.ndarray,
     *,
     method: str = "frangi",
     sigmas: tuple[float, ...] = (1, 2, 3),
+    device: str | None = None,
 ) -> np.ndarray:
     """Frangi or Sato (Hessian-based) ridge enhancement.
 
@@ -124,9 +264,32 @@ def enhance_ridges(
     run this on the raw probability map, then threshold the result (plain
     or via `hysteresis_threshold_mask`) instead of thresholding the raw
     probability map directly. Output is not normalized to [0,1].
+
+    `device` selects the backend: `"cuda"` uses the torch port above, `"cpu"`
+    uses skimage, and the default `None` means "cuda when a GPU is available".
+    The two agree to float32 round-off (see `_ridge_torch`), but skimage's
+    float64 Frangi costs ~60 s on a 46 MP image versus ~1 s on the GPU, which is
+    what makes ridge-based thresholding practical to run over a whole dataset at
+    all. A CUDA OOM falls back to the CPU path rather than failing the run.
     """
     if method not in ("frangi", "sato"):
         raise ValueError(f"method must be 'frangi' or 'sato', got {method!r}.")
+
+    use_cuda = torch.cuda.is_available() if device is None else device == "cuda"
+    if use_cuda:
+        try:
+            tensor = torch.from_numpy(
+                np.ascontiguousarray(image, dtype=np.float32)
+            )[None, None].cuda()
+            out = _ridge_torch(tensor, method=method, sigmas=tuple(sigmas))
+            return out[0, 0].cpu().numpy()
+        except torch.cuda.OutOfMemoryError:
+            torch.cuda.empty_cache()
+            print(
+                f"[enhance_ridges] CUDA out of memory on a {image.shape} image; "
+                "falling back to the CPU (skimage) path."
+            )
+
     image = image.astype(np.float64)
     if method == "frangi":
         return frangi(image, sigmas=sigmas, black_ridges=False)

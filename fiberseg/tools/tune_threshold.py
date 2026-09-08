@@ -41,12 +41,19 @@ def _counts_at(prob: np.ndarray, gt: np.ndarray, thresholds: np.ndarray):
     return tp.astype(np.float64), fp.astype(np.float64), fn.astype(np.float64)
 
 
-def sweep_thresholds(cfg, model, device, *, split="val", steps=99, verbose=True):
+def sweep_thresholds(cfg, model, device, *, split="val", steps=99, verbose=True,
+                     ridge=False):
     """Sweep `train.threshold` candidates on `split` and return (thresholds, metrics, n_images).
 
     `metrics` maps each metric name to an array aligned with `thresholds`. Factored out of
     `main()` so other entry points (e.g. `predict_all.py --tune-threshold`) can reuse the
     sweep without going through the CLI.
+
+    With `ridge=True` the sweep runs over the Hessian ridge response
+    (`tools.fiber_gap_repair.enhance_ridges`, configured by `cfg.inference.ridge_*`)
+    instead of the raw probability map, which is what `inference.threshold_mode: "ridge"`
+    thresholds at prediction time - so the value it returns calibrates
+    `inference.ridge_threshold` rather than `train.threshold`.
     """
     pairs = [p for p in find_pairs(cfg.data) if p.split == split]
     if not pairs:
@@ -62,6 +69,17 @@ def sweep_thresholds(cfg, model, device, *, split="val", steps=99, verbose=True)
             print(f"[{i}/{len(pairs)}] {pair.image_path.name}")
         img = _normalize_image(_read_gray(pair.image_path))
         prob = predict_prob(img, model, cfg, device)
+        if ridge:
+            # Local import: fiber_gap_repair pulls save_mask from predict_tiles, and
+            # importing it at module load time would create a cycle.
+            from .fiber_gap_repair import enhance_ridges
+
+            prob = enhance_ridges(
+                prob,
+                method=cfg.inference.ridge_method,
+                sigmas=tuple(cfg.inference.ridge_sigmas),
+                device=cfg.inference.ridge_device,
+            )
         gt = _read_gray(pair.mask_path)
         t_, f_, n_ = _counts_at(prob, gt, thresholds)
         tp += t_
@@ -135,7 +153,8 @@ def plot_pr_curve(thresholds, metrics, best_threshold, out_path, *, title=None):
 
 
 def find_best_threshold(
-    cfg, model, device, *, split="val", metric="dice", steps=99, verbose=True
+    cfg, model, device, *, split="val", metric="dice", steps=99, verbose=True,
+    ridge=False,
 ):
     """Sweep `train.threshold` on `split` and return
     `(best_threshold, stats_at_best, thresholds, metrics)` - the last two are the raw
@@ -148,7 +167,7 @@ def find_best_threshold(
     since tuning against test data would contaminate its evaluation.
     """
     thresholds, metrics, _ = sweep_thresholds(
-        cfg, model, device, split=split, steps=steps, verbose=verbose
+        cfg, model, device, split=split, steps=steps, verbose=verbose, ridge=ridge
     )
     score = metrics[metric]
     best = int(np.argmax(score))
@@ -177,6 +196,13 @@ def main():
     )
     parser.add_argument("--steps", type=int, default=99, help="Thresholds tried in (0,1).")
     parser.add_argument(
+        "--ridge",
+        action="store_true",
+        help="Sweep over the Hessian ridge response (enhance_ridges, configured by "
+        "inference.ridge_*) rather than the raw probability map - i.e. calibrate "
+        "inference.ridge_threshold for inference.threshold_mode: 'ridge'.",
+    )
+    parser.add_argument(
         "--plot",
         default=None,
         help="Optional path to save a precision-recall curve (AUC-PR) over the sweep, "
@@ -188,21 +214,27 @@ def main():
     model, device = load_predictor(args.checkpoint, cfg)
 
     thresholds, metrics, n_images = sweep_thresholds(
-        cfg, model, device, split=args.split, steps=args.steps
+        cfg, model, device, split=args.split, steps=args.steps, ridge=args.ridge
     )
     score = metrics[args.metric]
     best = int(np.argmax(score))
 
+    target_key = "inference.ridge_threshold" if args.ridge else "train.threshold"
+    swept_over = (
+        f"the {cfg.inference.ridge_method} ridge response" if args.ridge
+        else "the probability map"
+    )
+
     print("=" * 60)
     print(f"Tuned on split={args.split!r}, maximizing {args.metric!r} "
-          f"(micro-averaged over {n_images} images)")
+          f"(micro-averaged over {n_images} images, over {swept_over})")
     print(f"  default threshold 0.5 -> {args.metric}="
           f"{score[np.argmin(np.abs(thresholds - 0.5))]:.4f}")
     print(f"  BEST threshold {thresholds[best]:.3f} -> {args.metric}={score[best]:.4f}")
     print(f"  (dice={metrics['dice'][best]:.4f}, iou={metrics['iou'][best]:.4f}, "
           f"f2={metrics['f2'][best]:.4f})")
     print("=" * 60)
-    print(f"Set `train.threshold: {thresholds[best]:.3f}` in your config to use it.")
+    print(f"Set `{target_key}: {thresholds[best]:.3f}` in your config to use it.")
 
     if args.plot:
         auc = plot_pr_curve(

@@ -156,6 +156,10 @@ def main() -> int:
         print("Invalid device. Use 'cpu' or 'cuda'.")
         return 1
 
+    tune = ask(
+        "Re-tune the decision threshold on a real split before exporting? yes/no", "no"
+    ).lower()
+
     cmd = [
         sys.executable,
         "-m",
@@ -171,6 +175,33 @@ def main() -> int:
         "--device",
         device,
     ]
+
+    if tune in {"y", "yes"}:
+        tune_split = ask("Split to tune on (train/val/test)", "val").lower()
+        tune_metric = ask("Metric to maximize (dice/iou/f2/tversky)", "dice").lower()
+        tune_steps = ask("Thresholds to try in (0, 1)", "99")
+
+        if tune_split not in {"train", "val", "test"}:
+            print(f"Invalid split: {tune_split}")
+            return 1
+        if tune_metric not in {"dice", "iou", "f2", "tversky"}:
+            print(f"Invalid metric: {tune_metric}")
+            return 1
+        try:
+            int(tune_steps)
+        except ValueError:
+            print(f"Invalid step count: {tune_steps}")
+            return 1
+
+        cmd += [
+            "--tune-threshold",
+            "--tune-split",
+            tune_split,
+            "--tune-metric",
+            tune_metric,
+            "--tune-steps",
+            tune_steps,
+        ]
 
     print("\nRunning export:\n")
     print(" ".join(f'"{x}"' if " " in x else x for x in cmd))
