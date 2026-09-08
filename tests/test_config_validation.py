@@ -48,6 +48,119 @@ data:
         load_config(config_path)
 
 
+def test_load_config_rejects_negative_negative_ratio_final(tmp_path: Path) -> None:
+    config_path = tmp_path / "bad_ratio_final.yaml"
+    _write_config(
+        config_path,
+        """
+data:
+  images_dir: data/images
+  masks_dir: data/masks
+  tile_sampling: weighted
+  negative_ratio_final: -1.0
+""",
+    )
+
+    with pytest.raises(ValueError, match="negative_ratio_final"):
+        load_config(config_path)
+
+
+def test_load_config_rejects_negative_ratio_anneal_epochs(tmp_path: Path) -> None:
+    config_path = tmp_path / "bad_anneal_epochs.yaml"
+    _write_config(
+        config_path,
+        """
+data:
+  images_dir: data/images
+  masks_dir: data/masks
+  tile_sampling: weighted
+  negative_ratio_anneal_epochs: -1
+""",
+    )
+
+    with pytest.raises(ValueError, match="negative_ratio_anneal_epochs"):
+        load_config(config_path)
+
+
+def test_load_config_accepts_ratio_annealing_fields(tmp_path: Path) -> None:
+    config_path = tmp_path / "ratio_annealing.yaml"
+    _write_config(
+        config_path,
+        """
+data:
+  images_dir: data/images
+  masks_dir: data/masks
+  tile_sampling: weighted
+  negative_ratio: 1.0
+  negative_ratio_final: 4.0
+  negative_ratio_anneal_epochs: 10
+""",
+    )
+
+    cfg = load_config(config_path)
+    assert cfg.data.negative_ratio_final == 4.0
+    assert cfg.data.negative_ratio_anneal_epochs == 10
+
+
+def test_load_config_rejects_negative_focal_bce_weight(tmp_path: Path) -> None:
+    config_path = tmp_path / "bad_focal_bce_weight.yaml"
+    _write_config(
+        config_path,
+        """
+data:
+  images_dir: data/images
+  masks_dir: data/masks
+train:
+  loss:
+    focal_bce_weight: -1.0
+""",
+    )
+
+    with pytest.raises(ValueError, match="focal_bce_weight"):
+        load_config(config_path)
+
+
+def test_load_config_rejects_out_of_range_focal_bce_alpha(tmp_path: Path) -> None:
+    config_path = tmp_path / "bad_focal_bce_alpha.yaml"
+    _write_config(
+        config_path,
+        """
+data:
+  images_dir: data/images
+  masks_dir: data/masks
+train:
+  loss:
+    focal_bce_alpha: 1.5
+""",
+    )
+
+    with pytest.raises(ValueError, match="focal_bce_alpha"):
+        load_config(config_path)
+
+
+def test_load_config_accepts_focal_bce_fields(tmp_path: Path) -> None:
+    config_path = tmp_path / "focal_bce.yaml"
+    _write_config(
+        config_path,
+        """
+data:
+  images_dir: data/images
+  masks_dir: data/masks
+train:
+  loss:
+    name: focal_tversky
+    focal_bce_weight: 1.0
+    focal_bce_alpha: 0.25
+    focal_bce_gamma: 2.0
+""",
+    )
+
+    cfg = load_config(config_path)
+    assert cfg.train.loss.focal_bce_weight == 1.0
+    assert cfg.train.loss.focal_bce_alpha == 0.25
+    assert cfg.train.loss.focal_bce_gamma == 2.0
+
+
 def test_find_pairs_supports_custom_mask_pattern(tmp_path: Path) -> None:
     images_dir = tmp_path / "images"
     masks_dir = tmp_path / "masks"

@@ -1,0 +1,155 @@
+# Sampling-only experiment: does weighted sampling + hard-negative mining help,
+# holding EVERYTHING else at the baseline?
+#
+# This exists because the earlier configs/micronet/unetPlus_hard_negatives.yaml
+# run changed four things at once (sampling, loss name, tversky alpha/beta, and an
+# added focal-BCE term) and came out worse than baseline on every test metric -
+# precision 0.455 vs 0.544, recall 0.614 vs 0.735, dice 0.523 vs 0.625. With four
+# simultaneous changes none of that is attributable, and the alpha/beta flip is the
+# prime suspect: it moved BOTH precision and recall down, which is a strictly worse
+# model rather than a repositioning along the precision/recall curve.
+#
+# So this config changes exactly ONE thing relative to
+# configs/micronet/unetPlus_encoder_sweep_improved.yaml (the se_resnet152 arm):
+# how training tiles are SAMPLED. The entire train: block below - loss name,
+# tversky_alpha 0.4 / tversky_beta 0.7, focal_gamma, clDice, LR, scheduler,
+# patience 20, max_epochs 400 - is copied from it verbatim and must stay that way.
+#
+# Two consequences of that discipline, both deliberate:
+#   * val/soft_tversky is parameterized by tversky_alpha/beta, so keeping them at
+#     0.4/0.7 keeps the monitor metric IDENTICAL in meaning to the baseline. The
+#     previous run broke this, which made its 0.4544 incomparable to the
+#     baseline's 0.6644 and silently changed what checkpoint selection optimized.
+#   * No focal-BCE term (focal_bce_weight defaults to 0.0). It is a good idea, but
+#     it is a second variable and belongs in its own follow-up run.
+#
+# Run:
+#   python -m fiberseg.train --config configs/micronet/unetPlus_sampling_only.yaml
+#
+# COST: ~2,284 steps/epoch at negative_ratio_final 2.0 (vs the baseline's ~1,857)
+# and ~1.5 s/step measured for this loss on an RTX A2000 => ~57 min/epoch. The
+# baseline early-stopped at epoch 78, so budget on the order of 3-4 days.
+
+mlflow:
+  tracking_uri: "http://127.0.0.1:5000"
+  experiment_name: "fiber-sem-sampling-only"
+  run_name: null
+
+data:
+  images_dir: "C:/Users/lababr/Desktop/Sigurd/Current Training Material - fibers only - Preproc/Images"
+  masks_dir: "C:/Users/lababr/Desktop/Sigurd/Current Training Material - fibers only - Preproc/Masks"
+  image_glob: "*.tif"
+  mask_pattern: "{stem}_mask.tif"
+  image_channels: 3
+  image_normalization: "imagenet"
+  patch_size: 512
+  stride: 384
+  batch_size: 8
+  num_workers: 4
+  seed: 42
+  split:
+    train: 0.7
+    val: 0.15
+    test: 0.15
+
+  # ---- THE ONLY CHANGE VS BASELINE ------------------------------------------
+  # Baseline: static filtering, min_foreground_fraction 0.001 + keep_empty_probability
+  # 0.25, i.e. all fibre tiles plus a fixed random 25% of the empty ones, chosen once
+  # at startup and never revisited.
+  # Here: keep every tile in the pool and rebalance each epoch instead, ramping the
+  # background fraction up over the first 10 epochs and biasing half the negative
+  # draw toward the negatives the model currently gets wrong.
+  tile_sampling: "weighted"
+  min_foreground_fraction: 0.001   # in weighted mode this DEFINES positive vs negative
+  keep_empty_probability: 1.0      # inert under weighted sampling; explicit for clarity
+  negative_ratio: 1.0
+  negative_ratio_final: 2.0
+  negative_ratio_anneal_epochs: 10
+  hard_negative_fraction: 0.5
+  hard_negative_warmup_epochs: 8
+  # ---------------------------------------------------------------------------
+
+model:
+  architecture: "UnetPlusPlus"
+  encoder_name: "se_resnet152"
+  encoder_weights: "micronet"
+  in_channels: 3
+  classes: 1
+
+# ---- copied verbatim from unetPlus_encoder_sweep_improved.yaml - DO NOT EDIT ----
+# Any change here reintroduces a second variable and destroys the comparison.
+train:
+  max_epochs: 400
+  early_stopping:
+    patience: 20
+    min_delta: 0.0005
+  learning_rate: 0.00025
+  encoder_lr_ratio: 0.1
+  weight_decay: 0.0001
+  accelerator: "auto"
+  devices: "auto"
+  precision: "32-true"
+  threshold: 0.5
+
+  monitor_metric: "val/soft_tversky"
+  monitor_mode: "max"
+
+  loss:
+    name: "bce_focal_tversky"
+    tversky_alpha: 0.4
+    tversky_beta: 0.7
+    focal_gamma: 0.75
+    cldice_weight: 0.25
+    cldice_iters: 5
+
+  scheduler:
+    name: "reduce_on_plateau"
+    patience: 5
+    factor: 0.5
+    min_lr: 0.000001
+
+  swa: false
+  swa_lr: 0.0001
+
+  matmul_precision: "medium"
+  log_every_n_steps: 10
+  val_check_interval: 1.0
+  deterministic: false
+  profiler: null
+  model_export_path: null
+# ------------------------------- end verbatim block ----------------------------
+
+inference:
+  batch_size: 8
+  tile_blend: "gaussian"
+  reflect_pad: true
+  tta: false
+  threshold_mode: "fixed"
+  hysteresis_low: 0.3
+  hysteresis_high: 0.7
+
+augmentations:
+  train:
+    - name: HorizontalFlip
+      p: 0.5
+    - name: VerticalFlip
+      p: 0.5
+    - name: RandomRotate90
+      p: 0.5
+    - name: Affine
+      scale: [0.75, 1.35]
+      translate_percent: [-0.05, 0.05]
+      rotate: [-15, 15]
+      p: 0.5
+    - name: RandomBrightnessContrast
+      brightness_limit: 0.15
+      contrast_limit: 0.15
+      p: 0.4
+    - name: GaussNoise
+      std_range: [0.02, 0.08]
+      p: 0.3
+    - name: GaussianBlur
+      blur_limit: [3, 5]
+      p: 0.2
+  val: []
+  test: []

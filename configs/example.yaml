@@ -22,6 +22,17 @@ data:
   min_foreground_fraction: 0.0
   keep_empty_probability: 1.0
 
+  # Alternative to the static min_foreground_fraction/keep_empty_probability filter
+  # above: set tile_sampling to "weighted" to keep ALL tiles and resample the
+  # fiber:empty ratio fresh each epoch instead (see WeightedTileSampler in
+  # fiberseg/dataset.py). Uncomment to try it:
+  # tile_sampling: "weighted"
+  # negative_ratio: 1.0                # negatives per epoch, as a multiple of #positives
+  # hard_negative_fraction: 0.3        # fraction of negatives biased toward hardest tiles
+  # hard_negative_warmup_epochs: 3     # epochs of pure-random negatives before that bias kicks in
+  # negative_ratio_final: 4.0          # anneal negative_ratio toward this (a more realistic ratio)...
+  # negative_ratio_anneal_epochs: 10   # ...over this many epochs, starting fiber-rich
+
 model:
   architecture: "Unet"       # exchangeable: Unet, UnetPlusPlus, FPN, DeepLabV3Plus, etc.
   encoder_name: "resnet34"   # exchangeable: resnet18, resnet34, resnet50, efficientnet-b0, etc.
@@ -45,6 +56,18 @@ train:
     tversky_alpha: 0.3      # false-positive penalty
     tversky_beta: 0.7       # false-negative penalty; larger value means missed fibers matter more
     focal_gamma: 0.75
+
+    # Optional per-pixel focal-BCE term, ADDED on top of whichever `name` loss is
+    # selected above (like cldice_weight below). Region losses (dice/tversky) give
+    # a weak gradient on tiles already predicted correctly, including confidently-
+    # correct empty tiles - focal BCE gives a crisp per-pixel penalty for confident
+    # false positives there instead. Recommended when pairing with a realistic
+    # (higher-negative) sampling ratio: set name to "focal_tversky" (not
+    # "bce_focal_tversky", to avoid stacking plain BCE and focal BCE at once) and
+    # uncomment below.
+    # focal_bce_weight: 1.0
+    # focal_bce_alpha: 0.25
+    # focal_bce_gamma: 2.0
 
   # Only useful when model.encoder_weights is "imagenet"/"micronet" (a pretrained
   # encoder). Gives the encoder its own LR = learning_rate * encoder_lr_ratio so
@@ -71,6 +94,33 @@ train:
   # Export the best checkpoint to TorchScript right after training, named after
   # the MLflow experiment/run. Leave null to skip export.
   model_export_path: null
+
+inference:
+  # Tiles per model forward pass during tiled inference. A 46 MP image is ~700 tiles
+  # at patch_size 512 / stride 256, so batching them is ~1.25x faster end to end than
+  # the old one-tile-at-a-time loop. Lower it if inference runs out of GPU memory.
+  batch_size: 8
+
+  # How the probability map is binarized:
+  #   "fixed"      -> single cutoff at train.threshold (default)
+  #   "hysteresis" -> two-threshold, keeps low-confidence fibre continuations that are
+  #                   connected to a confident core (hysteresis_low/_high)
+  #   "ridge"      -> run a Hessian ridge filter over the probability map first and
+  #                   threshold that, scoring how ridge-like a neighbourhood is rather
+  #                   than how bright one pixel is. Bridges along-fibre gaps up front
+  #                   instead of repairing them afterwards. Calibrate ridge_threshold
+  #                   with: python -m fiberseg.tools.tune_threshold --config <cfg> \
+  #                       --checkpoint <ckpt> --ridge
+  threshold_mode: "fixed"
+  # hysteresis_low: 0.3
+  # hysteresis_high: 0.7
+  # ridge_method: "frangi"      # or "sato"
+  # ridge_sigmas: [1, 2, 3]     # fibre half-widths in px to respond to
+  # ridge_threshold: 0.5
+  # ridge_device: null          # null = GPU when available (~50x faster), or "cpu"
+
+  # 8x dihedral test-time augmentation; variants are generated/inverted on the GPU.
+  # tta: false
 
 mlflow:
   tracking_uri: "http://127.0.0.1:5000"

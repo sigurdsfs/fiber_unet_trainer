@@ -12,12 +12,12 @@ import torch
 from fiberseg.dataset import WeightedTileSampler, _apply_channel_norm
 from fiberseg.lit_module import (
     _confusion_counts,
+    _focal_bce_loss,
     _soft_cldice,
     _stats_from_counts,
 )
 from fiberseg.predict_tiles import _TTA_TRANSFORMS, _gaussian_window
 from fiberseg.tools.tune_threshold import _counts_at
-
 
 # --- channel standardization -------------------------------------------------
 
@@ -130,6 +130,53 @@ def test_cldice_is_differentiable():
     assert x.grad.abs().sum() > 0
 
 
+# --- focal BCE ---------------------------------------------------------------
+
+def test_focal_bce_near_zero_for_confident_correct_pixel():
+    target = torch.ones(1, 1, 1, 1)
+    logits = _logit(target, p_fg=0.999, p_bg=0.001)
+    loss = _focal_bce_loss(logits, target, alpha=0.25, gamma=2.0)
+    assert loss.item() < 1e-3
+
+
+def test_focal_bce_large_for_confident_wrong_pixel():
+    target = torch.ones(1, 1, 1, 1)
+    # target says fiber, but the "prediction" (p_fg) confidently says background.
+    logits = _logit(target, p_fg=0.001, p_bg=0.999)
+    loss = _focal_bce_loss(logits, target, alpha=0.25, gamma=2.0)
+    assert loss.item() > 1.0
+
+
+def test_focal_bce_gamma_downweights_easy_examples():
+    target = torch.ones(1, 1, 1, 1)
+    logits = _logit(target, p_fg=0.9, p_bg=0.1)  # correct but not maximally confident
+    loss_gamma0 = _focal_bce_loss(logits, target, alpha=0.25, gamma=0.0)
+    loss_gamma2 = _focal_bce_loss(logits, target, alpha=0.25, gamma=2.0)
+    assert loss_gamma2 < loss_gamma0
+
+
+def test_focal_bce_alpha_weights_positive_class_more():
+    pos_target = torch.ones(1, 1, 1, 1)
+    neg_target = torch.zeros(1, 1, 1, 1)
+    # Same confidence-of-wrongness (pt=0.001) on both, so any difference in loss
+    # is purely alpha's positive/negative class reweighting.
+    pos_logits = _logit(pos_target, p_fg=0.001, p_bg=0.999)
+    neg_logits = _logit(neg_target, p_fg=0.999, p_bg=0.999)
+    loss_pos = _focal_bce_loss(pos_logits, pos_target, alpha=0.8, gamma=2.0)
+    loss_neg = _focal_bce_loss(neg_logits, neg_target, alpha=0.8, gamma=2.0)
+    assert loss_pos > loss_neg
+
+
+def test_focal_bce_is_differentiable():
+    target = torch.zeros(1, 1, 4, 4)
+    target[0, 0, 1:3, 1:3] = 1.0
+    x = _logit(target, 0.6, 0.4).clone().requires_grad_(True)
+    loss = _focal_bce_loss(x, target, alpha=0.25, gamma=2.0)
+    loss.backward()
+    assert torch.isfinite(x.grad).all()
+    assert x.grad.abs().sum() > 0
+
+
 # --- epoch-wise metric micro-averaging --------------------------------------
 
 def test_confusion_counts_and_stats_perfect_prediction():
@@ -215,6 +262,35 @@ def test_sampler_warmup_is_uniform():
     hard_rate = sum(counts[i] for i in range(10, 20)) / 10
     other_rate = sum(counts[i] for i in range(20, 100)) / 80
     assert hard_rate < 2 * other_rate, "warmup draw should be roughly uniform"
+
+
+def test_sampler_ratio_anneals_and_length_stays_constant():
+    s = _sampler(
+        n_pos=10, n_neg=90, negative_ratio=1.0,
+        negative_ratio_final=4.0, negative_ratio_anneal_epochs=4,
+    )
+    # Length is fixed for the whole run, at whichever ratio implies more negatives.
+    assert len(s) == 10 + 40
+
+    drawn0 = list(iter(s))
+    assert len(drawn0) == len(s)  # shortfall padded with repeated positives
+    assert sum(1 for i in drawn0 if i >= 10) == 10  # negative_ratio=1.0 * 10 positives
+
+    for _ in range(10):
+        iter(s)  # advance well past the anneal ramp
+
+    drawn_final = list(iter(s))
+    assert len(drawn_final) == len(s)
+    assert sum(1 for i in drawn_final if i >= 10) == 40  # negative_ratio_final=4.0 * 10 positives
+
+
+def test_sampler_without_final_ratio_is_unaffected_by_annealing_fields():
+    # negative_ratio_final unset (None) must reproduce plain, un-annealed behavior.
+    s = _sampler(n_pos=10, n_neg=90, negative_ratio=2.0)
+    assert len(s) == 10 + 20
+    drawn = list(iter(s))
+    assert len(drawn) == len(s)
+    assert sum(1 for i in drawn if i >= 10) == 20
 
 
 # --- threshold sweep counting ------------------------------------------------

@@ -1,0 +1,246 @@
+# Hard-negative / scratch-rejection experiment.
+#
+# Purpose: reduce FALSE POSITIVES on negative tiles - specifically scratches and
+# other linear filter artefacts being labelled as fibres - and measure whether the
+# new sampling/loss machinery actually helps.
+#
+# This is a deliberate A/B against configs/micronet/unetPlus_encoder_sweep_improved.yaml:
+# same data, same model, same augmentations, same seed. Only the four blocks marked
+# [CHANGED] differ, so any metric difference is attributable to them.
+#
+# Run:
+#   python -m fiberseg.train --config configs/micronet/unetPlus_hard_negatives.yaml
+#
+# COST: ~47 min/epoch on an RTX A2000 (measured, see the runtime note under
+# negative_ratio_final). Early stopping should end it well before max_epochs, but
+# this is still a multi-day run - the same order as your existing baseline.
+#
+# FAST PILOT (~2-3 h) - answers "does hard-negative mining + focal-BCE move the
+# false-positive rate at all?" before committing days to the full model. Override
+# just these, keeping everything else identical:
+#     model.encoder_name: "resnet34"     # ~6x cheaper than se_resnet152
+#     model.encoder_weights: "imagenet"
+#     train.max_epochs: 30
+#     train.early_stopping.patience: 6
+# A lighter encoder will not reproduce the final numbers, but the DIRECTION of the
+# precision/false-positive change is what the pilot is for. If it does not move
+# there, it is unlikely to be worth the full run.
+#
+# Evaluate (the part that actually answers the question):
+#   python -m fiberseg.tools.tune_threshold --config <this> --checkpoint <best.ckpt>
+#   python -m fiberseg.predict_all --config <this> --checkpoint <best.ckpt> \
+#       --out-dir predictions/hard_neg --tune-threshold
+#   -> predictions/hard_neg/metrics.csv has per-image `raw_precision`,
+#      `raw_specificity`, `raw_fp` and `gt_foreground_fraction`. Sort ascending by
+#      gt_foreground_fraction: the emptiest images are the ones dominated by
+#      background and artefacts, so their fp / precision columns are the closest
+#      proxy this pipeline currently has for "how badly do scratches fool it".
+#      Compare those same columns against the baseline run above.
+
+mlflow:
+  tracking_uri: "http://127.0.0.1:5000"
+  experiment_name: "fiber-sem-hard-negatives"
+  run_name: null
+
+data:
+  images_dir: "C:/Users/lababr/Desktop/Sigurd/Current Training Material - fibers only - Preproc/Images"
+  masks_dir: "C:/Users/lababr/Desktop/Sigurd/Current Training Material - fibers only - Preproc/Masks"
+  image_glob: "*.tif"
+  mask_pattern: "{stem}_mask.tif"
+  image_channels: 3
+  image_normalization: "imagenet"
+  patch_size: 512
+  stride: 384
+  batch_size: 8
+  num_workers: 4
+  seed: 42
+  split:
+    train: 0.7
+    val: 0.15
+    test: 0.15
+
+  # ---------------------------------------------------------------- [CHANGED 1]
+  # The baseline uses static filtering with keep_empty_probability: 0.25, i.e. it
+  # THROWS AWAY 75% of the empty tiles at dataset-construction time - and empty
+  # tiles are exactly where the scratches live. A model that rarely sees a scratch
+  # never learns to reject one.
+  #
+  # "weighted" keeps every tile in the pool and rebalances per epoch instead, so
+  # all the scratch tiles stay reachable and the fibre:background ratio becomes a
+  # knob rather than a re-tiling decision.
+  tile_sampling: "weighted"
+
+  # NOTE: in weighted mode min_foreground_fraction no longer drops tiles - it
+  # DEFINES which tiles count as positive (fg >= threshold). It must stay > 0:
+  # at 0.0 the test `fg >= 0` is true for every tile, so every tile would be
+  # classed positive and there would be no negatives left to mine.
+  min_foreground_fraction: 0.001
+  keep_empty_probability: 1.0   # inert under weighted sampling; left explicit
+
+  # Curriculum: start near-balanced so the model first learns what a fibre IS,
+  # then ramp the background fraction up so it has to learn discrimination rather
+  # than "anything elongated is a fibre". Epoch length is held constant at the
+  # final ratio throughout (early epochs pad with repeated positives), so
+  # steps/epoch do not change mid-run.
+  #
+  # RUNTIME - this directly sets epoch length, so read before raising it. Measured
+  # on this dataset (6,090 positive / 35,069 negative train tiles) and this GPU
+  # (RTX A2000, UnetPlusPlus+se_resnet152, batch 8 @512, AMP). Observed in an
+  # actual run of this config: 1.70 s/step steady-state - note that is well above
+  # the 1.24 s/step a bare forward+backward benchmarks at, because clDice (5
+  # iterations of min/max pooling), focal-BCE, focal-Tversky and the per-tile
+  # difficulty pass all sit on top:
+  #     ratio 1.0 (baseline static, keep_empty 0.25)  ~1,857 steps  ~53 min/epoch
+  #     ratio 2.0 (this config)                        2,284 steps  ~65 min/epoch
+  #     ratio 4.0                                      3,806 steps ~108 min/epoch
+  # 2.0 is chosen deliberately: the mechanism that actually targets scratches is
+  # hard_negative_fraction below (it reweights WHICH negatives you see), not the
+  # raw count, so paying 2x epoch time for ratio 4.0 buys little here. The pool
+  # supports up to 5.8:1 if you do want to push it - beyond that it silently caps.
+  negative_ratio: 1.0
+  negative_ratio_final: 2.0
+  negative_ratio_anneal_epochs: 10
+
+  # Bias half the per-epoch negative draw toward the negatives with the highest
+  # recent training loss. This is the mechanism that targets scratches directly:
+  # a scratch tile the model currently fires on scores high loss, so it gets
+  # resampled far more often than empty membrane does. Warmup keeps sampling
+  # uniform until the difficulty estimates mean something.
+  hard_negative_fraction: 0.5
+  hard_negative_warmup_epochs: 8
+
+model:
+  architecture: "UnetPlusPlus"
+  encoder_name: "se_resnet152"
+  encoder_weights: "micronet"
+  in_channels: 3
+  classes: 1
+
+train:
+  # An epoch here is ~2,284 steps vs the baseline's ~1,857, so epochs are NOT
+  # comparable units between the two configs - this budget is ~1.5x the baseline's
+  # gradient updates, not 1/3 of them. At the measured ~65 min/epoch, 120 epochs is
+  # a ~130 h ceiling; early stopping should land far short of that. Patience is 10
+  # rather than the baseline's 20 because each epoch now costs ~11 h of patience.
+  max_epochs: 120
+  early_stopping:
+    patience: 10
+    min_delta: 0.0005
+  learning_rate: 0.00025
+  encoder_lr_ratio: 0.1
+  weight_decay: 0.0001
+  accelerator: "auto"
+  devices: "auto"
+  precision: "32-true"
+  threshold: 0.5
+
+  # Because _stats_from_counts is parameterized by tversky_alpha/beta, raising
+  # alpha below ALSO makes val/soft_tversky false-positive-sensitive - so the
+  # metric driving checkpointing and early stopping now agrees with the objective
+  # of this experiment instead of quietly rewarding recall.
+  monitor_metric: "val/soft_tversky"
+  monitor_mode: "max"
+
+  loss:
+    # ------------------------------------------------------------- [CHANGED 2]
+    # Base is "focal_tversky", NOT "bce_focal_tversky": the focal-BCE term below
+    # replaces the plain unweighted BCE the baseline added. Stacking both would
+    # double-count the per-pixel term.
+    name: "focal_tversky"
+
+    # ------------------------------------------------------------- [CHANGED 3]
+    # alpha (FP penalty) raised above beta (FN penalty) - the baseline has this
+    # the other way round (0.4 / 0.7, "never miss a fibre"). This is the central
+    # trade-off of the experiment and it WILL cost some recall: it tells the model
+    # that calling a scratch a fibre is now worse than missing a faint fibre.
+    # If over-counting is not actually your bigger regulatory risk, drop alpha back.
+    tversky_alpha: 0.7
+    tversky_beta: 0.5
+    focal_gamma: 0.75
+
+    cldice_weight: 0.25
+    cldice_iters: 5
+
+    # ------------------------------------------------------------- [CHANGED 4]
+    # Per-pixel focal BCE, added on top of the region loss. Region losses (dice /
+    # tversky) go near-zero-gradient on a tile the model already predicts
+    # correctly, so on a correctly-empty tile they teach almost nothing, and on an
+    # empty tile with a scratch false positive they react only weakly. This term
+    # is what supplies a crisp per-pixel "no, that scratch is not a fibre" signal.
+    # alpha 0.25 weights background pixels 0.75 vs 0.25 for fibre, i.e. it
+    # penalizes false positives harder; gamma 2.0 concentrates the loss on the
+    # hard/wrong pixels instead of the vast easy background.
+    focal_bce_weight: 1.0
+    focal_bce_alpha: 0.25
+    focal_bce_gamma: 2.0
+
+  scheduler:
+    name: "reduce_on_plateau"
+    patience: 5
+    factor: 0.5
+    min_lr: 0.000001
+
+  swa: false
+  swa_lr: 0.0001
+
+  matmul_precision: "medium"
+  log_every_n_steps: 10
+  val_check_interval: 1.0
+  deterministic: false
+  profiler: null
+  model_export_path: null
+
+inference:
+  # Batched tiled inference (~1.25x faster than the old per-tile loop).
+  batch_size: 8
+  tile_blend: "gaussian"
+  reflect_pad: true
+  tta: false
+
+  threshold_mode: "fixed"
+  hysteresis_low: 0.3
+  hysteresis_high: 0.7
+
+  # WARNING - do NOT reach for threshold_mode: "ridge" to fix scratches. The
+  # Frangi/Sato ridge filter scores how ridge-like a neighbourhood is, and a
+  # scratch is an elongated ridge-like structure too, so ridge enhancement is
+  # likely to AMPLIFY scratch false positives rather than suppress them. Ridge
+  # mode is for reconnecting fragmented fibres, which is the opposite problem.
+  # If you do want to check that empirically, it is one run:
+  #   python -m fiberseg.tools.tune_threshold --config <this> --checkpoint <ckpt> --ridge
+  # then set threshold_mode: "ridge" and the printed inference.ridge_threshold,
+  # and diff metrics.csv - but expect precision to drop, not rise.
+
+augmentations:
+  train:
+    - name: HorizontalFlip
+      p: 0.5
+    - name: VerticalFlip
+      p: 0.5
+    - name: RandomRotate90
+      p: 0.5
+    - name: Affine
+      scale: [0.75, 1.35]
+      translate_percent: [-0.05, 0.05]
+      rotate: [-15, 15]
+      p: 0.5
+    - name: RandomBrightnessContrast
+      brightness_limit: 0.15
+      contrast_limit: 0.15
+      p: 0.4
+    - name: GaussNoise
+      std_range: [0.02, 0.08]
+      p: 0.3
+    - name: GaussianBlur
+      blur_limit: [3, 5]
+      p: 0.2
+  val: []
+  test: []
+
+# Controlled A/B of the new focal-BCE term with everything else held fixed -
+# focal_bce_weight: 0.0 is the control (region loss only). Uncomment to run, and
+# use fiberseg.train, NOT fiberseg.sweep (sweep.py re-expands the grid inside each
+# outer iteration - see CLAUDE.md). Note this multiplies an already-long run by 3.
+#
+# sweep:
+#   train.loss.focal_bce_weight: [0.0, 1.0, 2.0]
