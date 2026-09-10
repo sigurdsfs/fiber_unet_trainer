@@ -55,19 +55,25 @@ data:
 
 ## Environment setup
 
-A typical Conda workflow on Windows:
+Create the pinned Conda environment from [environment.yaml](environment.yaml). Run this from
+the repo root - it also installs this package in editable mode together with the dev tools
+(pytest, ruff, black, pre-commit):
 
 ```powershell
-conda create -n cnn_test python=3.11 -y
+conda env create -f environment.yaml
 conda activate cnn_test
-pip install -r requirements.txt
 ```
 
-If you want editable installs and local development tooling:
+Only if you use `encoder_weights: "micronet"`, then install NASA's package **with
+`--no-deps`**. Its metadata pins `segmentation-models-pytorch==0.2.1`, so a normal install
+downgrades smp and timm for the whole environment (see the header of `environment.yaml`):
 
 ```powershell
-pip install -e .[dev]
+pip install --no-deps "pretrained_microscopy_models @ git+https://github.com/nasa/pretrained-microscopy-models@9b7c4abc1321e81eca7a68d548e5371676fa74fa"
 ```
+
+The MicroNet encoder weights themselves are downloaded automatically on first use, so that
+first run needs internet access.
 
 ## MLflow setup
 

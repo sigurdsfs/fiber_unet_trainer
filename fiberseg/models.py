@@ -58,8 +58,11 @@ def create_micronet_model(cfg: ModelConfig):
     except ImportError as e:
         raise ImportError(
             "encoder_weights='micronet' requires NASA pretrained-microscopy-models. "
-            "Install it with:\n"
-            "pip install git+https://github.com/nasa/pretrained-microscopy-models"
+            "Install it WITHOUT its dependencies - it pins segmentation-models-pytorch==0.2.1, "
+            "and a normal install downgrades smp/timm for the whole environment:\n"
+            'pip install --no-deps "pretrained_microscopy_models @ '
+            "git+https://github.com/nasa/pretrained-microscopy-models"
+            '@9b7c4abc1321e81eca7a68d548e5371676fa74fa"'
         ) from e
 
     model = pmm.segmentation_training.create_segmentation_model(
