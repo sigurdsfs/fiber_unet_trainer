@@ -15,11 +15,11 @@ images into patches for both training and inference.
 All commands assume `cd fiber_unet_trainer` and an activated environment (see below).
 
 ```powershell
-# Environment
-conda create -n cnn_test python=3.11 -y
+# Environment (pinned; also does the editable install + pytest/ruff/black/pre-commit)
+conda env create -f environment.yaml
 conda activate cnn_test
-pip install -r requirements.txt
-pip install -e .[dev]        # editable install + pytest/ruff/black/pre-commit
+# Only for encoder_weights: "micronet" - must be --no-deps (see environment.yaml header)
+pip install --no-deps "pretrained_microscopy_models @ git+https://github.com/nasa/pretrained-microscopy-models@9b7c4abc1321e81eca7a68d548e5371676fa74fa"
 
 # Local MLflow UI (start before training so runs are logged/visible)
 start_mlflow.bat             # serves at http://127.0.0.1:5000
@@ -108,7 +108,7 @@ config as an MLflow artifact.
 - Normal case → any `segmentation_models_pytorch` architecture (`Unet`, `UnetPlusPlus`, `FPN`,
   `DeepLabV3Plus`, ...) looked up dynamically by name from `smp`, with `activation=None`.
 - `encoder_weights: "micronet"` → NASA's `pretrained_microscopy_models` package (external, optional
-  dependency, not in `requirements.txt` — install from GitHub if needed) via
+  dependency, installed separately with `--no-deps` as described in `environment.yaml`) via
   `create_segmentation_model`, then `force_raw_logits()` strips any built-in output activation
   (Sigmoid/Softmax/Activation wrapper) it may add.
 
