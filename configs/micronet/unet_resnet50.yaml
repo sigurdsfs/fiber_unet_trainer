@@ -10,8 +10,8 @@ mlflow:
 
 
 data:
-  images_dir: "d:/H3 Asbest/Current Training Material - fibers only - Preproc/Clean Subset/Images"
-  masks_dir: "d:/H3 Asbest/Current Training Material - fibers only - Preproc/Clean Subset/Masks"
+  images_dir: "../Current Training Material - fibers only - Preproc/Clean Subset/Images"
+  masks_dir: "../Current Training Material - fibers only - Preproc/Clean Subset/Masks"
   image_glob: "*.tif"
   mask_pattern: "{stem}_mask.tif"
   image_channels: 3

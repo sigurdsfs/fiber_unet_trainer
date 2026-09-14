@@ -1,6 +1,6 @@
 data:
-  images_dir: "C:/Users/lababr/Desktop/Current Training Material - fibers only"
-  masks_dir: "C:/Users/lababr/Desktop/Current Training Material - fibers only"
+  images_dir: "../Current Training Material - fibers only - Preproc/Images"
+  masks_dir: "../Current Training Material - fibers only - Preproc/Masks"
   image_glob: "*.tif"
   mask_pattern: "{stem}_mask.tif"
 

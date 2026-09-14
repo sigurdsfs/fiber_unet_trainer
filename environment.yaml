@@ -8,6 +8,11 @@
 #   pip install --no-deps "pretrained_microscopy_models @ git+https://github.com/nasa/pretrained-microscopy-models@9b7c4abc1321e81eca7a68d548e5371676fa74fa"
 #   pytest
 #
+# If the machine has no git installed, the same pinned commit installs straight from
+# the GitHub zip - no git required, same --no-deps rule:
+#
+#   pip install --no-deps "https://github.com/nasa/pretrained-microscopy-models/archive/9b7c4abc1321e81eca7a68d548e5371676fa74fa.zip"
+#
 # Why MicroNet (encoder_weights: "micronet") is a separate --no-deps step: NASA's
 # pretrained-microscopy-models declares segmentation-models-pytorch==0.2.1 as an EXACT
 # pin (plus opencv-python), so listing it below makes pip fail with ResolutionImpossible
@@ -53,6 +58,11 @@ dependencies:
       # this pin it only arrives transitively through mlflow, at a different version.
       - scikit-learn==1.8.0
       - tifffile==2026.3.3
+      # Required to read the training TIFFs: they are LZW-compressed, and tifffile
+      # delegates every compressed codec to imagecodecs. Without it _read_gray dies
+      # with "<COMPRESSION.LZW: 5> requires the 'imagecodecs' package" as soon as
+      # tiles are built. tifffile does NOT declare it, so it must be listed here.
+      - imagecodecs==2026.3.6
       - pillow==12.1.1
       - pandas==2.3.3
       - openpyxl==3.1.5

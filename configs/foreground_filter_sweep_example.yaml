@@ -7,8 +7,8 @@
 # section (for which combinations to test) are read - model/train/mlflow/etc are ignored.
 
 data:
-  images_dir: 'C:\Users\sigur\Desktop\Current Training Material - fibers only - Preproc'
-  masks_dir: 'C:\Users\sigur\Desktop\Current Training Material - fibers only - Preproc'
+  images_dir: "../Current Training Material - fibers only - Preproc/Images"
+  masks_dir: "../Current Training Material - fibers only - Preproc/Masks"
   image_glob: "*.tif"
   mask_pattern: "{stem}_mask.tif"
   seed: 42
