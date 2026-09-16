@@ -59,4 +59,5 @@ data/
 
 # --- Misc generated files ---
 *.log
+logs/
 plot.png

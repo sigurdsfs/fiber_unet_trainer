@@ -314,7 +314,22 @@ def _resolve_cache_dir(cfg: DataConfig) -> Path:
 
 
 def _cache_file_path(path: Path, cache_dir: Path, tag: str) -> Path:
-    stat = path.stat()
+    # Same transient-Windows-I/O hazard as the np.load retry below (antivirus/backup
+    # briefly holding a handle on the SOURCE file this time, not the cache file) can
+    # make a bare stat() here fail even though the file is present and about to be
+    # readable again a moment later. A single unlucky worker call used to be enough
+    # to kill an entire multi-hour training run outright - retry with the same
+    # backoff instead of treating it as fatal.
+    max_attempts = 10
+    stat = None
+    for attempt in range(max_attempts):
+        try:
+            stat = path.stat()
+            break
+        except (PermissionError, OSError):
+            if attempt == max_attempts - 1:
+                raise
+            time.sleep(0.05 * (attempt + 1))
     raw_key = f"{path.resolve()}|{stat.st_mtime_ns}|{stat.st_size}|{tag}"
     digest = hashlib.sha1(raw_key.encode()).hexdigest()[:16]
     return cache_dir / f"{path.stem}_{tag}_{digest}.npy"
