@@ -1,0 +1,143 @@
+# FAST PROXY - baseline recipe on a cheap model, repeated over 3 training seeds.
+#
+# Why this exists: the full UnetPlusPlus + se_resnet152 recipe costs 3-4 days per run,
+# i.e. roughly one experiment a week, and a single run's test dice has a ~+-0.045
+# bootstrap interval - so single-seed full-size A/Bs can't resolve the 0.02-0.03 effects
+# being tested. The proxy trades absolute score for iteration speed: a Unet + resnet34
+# (ImageNet weights; MicroNet's resnet34 availability is unverified) is ~6x cheaper per
+# step. Use it to decide the DIRECTION of a change, then retrain only the winners at
+# full size.
+#
+# This file is the proxy CONTROL. Its siblings change exactly one thing each:
+#   resnet34_balanced_loss.yaml   tversky alpha/beta 0.4/0.7 -> 0.5/0.5
+#   resnet34_pixelstd_50nm.yaml   data resampled to 50 nm/px
+# Everything else (data, split, augmentations, loss, schedule, seeds) is identical.
+#
+# Differences vs the full baseline (configs/micronet/unetPlus_encoder_sweep_improved.yaml),
+# applied equally to all proxy arms so they don't bias the comparison:
+#   * model: Unet / resnet34 / imagenet   (was UnetPlusPlus / se_resnet152 / micronet)
+#   * precision: bf16-mixed               (was "32-true", which train.py silently runs as
+#                                          fp16 AMP on GPU - so no speed change, just no
+#                                          loss scaling / fp16 overflow risk)
+#   * monitor_metric: val/soft_dice       (val/soft_tversky depends on tversky_alpha/beta,
+#                                          so it is not comparable across the loss arm)
+#   * max_epochs 80, patience 12          (budget cap for a proxy)
+#   * inference.tta: true                 (8x dihedral TTA - inference only, no retrain)
+#   * sweep over train.seed [1, 2, 3]     (same split every time - data.seed is unchanged)
+#
+# Run (fiberseg.train, NOT fiberseg.sweep - see CLAUDE.md):
+#   python -m fiberseg.train --config configs/proxy/resnet34_baseline.yaml
+# Then per checkpoint:
+#   python -m fiberseg.predict_all --config <this> --checkpoint <best.ckpt> \
+#       --out-dir predictions/proxy_baseline_s<seed> --tune-threshold
+# and compare arms with:
+#   python -m fiberseg.tools.compare_runs --a predictions/proxy_baseline_s*/metrics.csv \
+#       --b predictions/proxy_balanced_s*/metrics.csv --split test
+
+mlflow:
+  tracking_uri: "http://127.0.0.1:5000"
+  experiment_name: "fiber-sem-proxy-baseline"
+  run_name: null
+
+data:
+  images_dir: "../Current Training Material - fibers only - Preproc/Images"
+  masks_dir: "../Current Training Material - fibers only - Preproc/Masks"
+  image_glob: "*.tif"
+  mask_pattern: "{stem}_mask.tif"
+  image_channels: 3
+  image_normalization: "imagenet"
+  patch_size: 512
+  stride: 384
+  batch_size: 8
+  num_workers: 4
+  seed: 42                    # fixes the SPLIT - keep identical across all arms
+  split:
+    train: 0.7
+    val: 0.15
+    test: 0.15
+  tile_sampling: "static"
+  min_foreground_fraction: 0.001
+  keep_empty_probability: 0.25
+
+model:
+  architecture: "Unet"
+  encoder_name: "resnet34"
+  encoder_weights: "imagenet"
+  in_channels: 3
+  classes: 1
+
+train:
+  max_epochs: 80
+  early_stopping:
+    patience: 12
+    min_delta: 0.0005
+  learning_rate: 0.00025
+  encoder_lr_ratio: 0.1
+  weight_decay: 0.0001
+  accelerator: "auto"
+  devices: "auto"
+  precision: "bf16-mixed"
+  threshold: 0.5
+
+  monitor_metric: "val/soft_dice"
+  monitor_mode: "max"
+
+  loss:
+    name: "bce_focal_tversky"
+    tversky_alpha: 0.4
+    tversky_beta: 0.7
+    focal_gamma: 0.75
+    cldice_weight: 0.25
+    cldice_iters: 5
+
+  scheduler:
+    name: "reduce_on_plateau"
+    patience: 5
+    factor: 0.5
+    min_lr: 0.000001
+
+  swa: false
+  swa_lr: 0.0001
+
+  matmul_precision: "medium"
+  log_every_n_steps: 10
+  val_check_interval: 1.0
+  deterministic: false
+  profiler: null
+  model_export_path: null
+
+inference:
+  batch_size: 8
+  tile_blend: "gaussian"
+  reflect_pad: true
+  tta: true
+  threshold_mode: "fixed"
+
+augmentations:
+  train:
+    - name: HorizontalFlip
+      p: 0.5
+    - name: VerticalFlip
+      p: 0.5
+    - name: RandomRotate90
+      p: 0.5
+    - name: Affine
+      scale: [0.75, 1.35]
+      translate_percent: [-0.05, 0.05]
+      rotate: [-15, 15]
+      p: 0.5
+    - name: RandomBrightnessContrast
+      brightness_limit: 0.15
+      contrast_limit: 0.15
+      p: 0.4
+    - name: GaussNoise
+      std_range: [0.02, 0.08]
+      p: 0.3
+    - name: GaussianBlur
+      blur_limit: [3, 5]
+      p: 0.2
+  val: []
+  test: []
+
+sweep:
+  train.seed: [1, 2, 3]

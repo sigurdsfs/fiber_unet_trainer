@@ -14,6 +14,8 @@ Tries several sources, in priority order, and records which one won:
        XML tags whose name carries the unit, e.g. `<PixelWidth_um>0.0508...`
        (seen on raw captures in this project - the "Preproc" training tiles
        have this metadata stripped, so this only fires on un-cropped originals).
+     * ImageJ's `Info` property (tag 50839): files re-saved by ImageJ/Fiji keep
+       the original description there instead of in tag 270.
      * Generic `XResolution`/`ResolutionUnit` TIFF tags, plausibility-gated
        since SEM software often leaves these at meaningless defaults.
   2. The filename itself: this project's raw benchmark captures encode it
@@ -215,6 +217,18 @@ def _from_description(tif: tifffile.TiffFile, img_w: int) -> PixelSize | None:
     return _from_xml_tags(text)
 
 
+def _from_imagej_info(tif: tifffile.TiffFile) -> PixelSize | None:
+    """Images re-saved by ImageJ/Fiji replace tag 270 with ImageJ's own header
+    (`ImageJ=1.54f\\nunit=inch`) and move the original description into the `Info`
+    property (tag 50839) - e.g. `Info: ImageDescription: <Image><PixelWidth_um>...`.
+    Same XML parse as `_from_description`, just on that relocated text."""
+    info = (getattr(tif, "imagej_metadata", None) or {}).get("Info")
+    if not info:
+        return None
+    ps = _from_xml_tags(str(info))
+    return PixelSize(ps.nm, f"imagej-info:{ps.source.split(':', 1)[-1]}") if ps else None
+
+
 def _from_sidecar(path: str, img_w: int) -> PixelSize | None:
     """Hitachi & others write a same-basename .txt next to the image."""
     for cand in (os.path.splitext(path)[0] + ".txt", path + ".txt"):
@@ -318,6 +332,7 @@ def pixel_size_nm(path: str) -> PixelSize:
                 lambda: _from_zeiss(tif),
                 lambda: _from_sidecar(path, img_w),
                 lambda: _from_description(tif, img_w),
+                lambda: _from_imagej_info(tif),
             ):
                 ps = fn()
                 if ps is not None:

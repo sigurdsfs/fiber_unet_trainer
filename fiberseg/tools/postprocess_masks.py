@@ -181,8 +181,11 @@ def main():
         processed_images = {r["image"] for r in rows}
         raw_rows = [r for r in raw_rows if r["image"] in processed_images]
         if raw_rows:
+            # Only metrics the raw CSV actually has: one written before a metric was added
+            # to FIELDNAMES (e.g. the tol_*/cldice columns) simply lacks that column.
+            shared = [k for k in FIELDNAMES[2:] if k in raw_rows[0]]
             raw_means = {
-                k: statistics.fmean(float(row[k]) for row in raw_rows) for k in FIELDNAMES[2:]
+                k: statistics.fmean(float(row[k]) for row in raw_rows) for k in shared
             }
             print(
                 "Raw (pre-processing) mean metrics, same images: "
@@ -190,7 +193,7 @@ def main():
             )
             print(
                 "Delta (post - raw): "
-                + ", ".join(f"{k}={means[k] - raw_means[k]:+.4f}" for k in FIELDNAMES[2:])
+                + ", ".join(f"{k}={means[k] - raw_means[k]:+.4f}" for k in shared)
             )
     else:
         print(

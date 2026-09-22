@@ -336,6 +336,13 @@ class TrainConfig:
     precision: str = "32-true"
     threshold: float = 0.5
 
+    # Seed for weight init, augmentation and dataloader shuffling. Deliberately separate
+    # from data.seed, which fixes the train/val/test split: sweeping train.seed repeats
+    # a run on the SAME split, which is how to measure run-to-run noise before trusting
+    # a small metric difference between two configs. null falls back to data.seed
+    # (the historical behaviour, so existing runs reproduce unchanged).
+    seed: int | None = None
+
     # Metric that drives checkpoint selection, early stopping, and (for
     # reduce_on_plateau) LR scheduling. Any metric logged by the LightningModule
     # works. Default is "val/soft_tversky" (recall-weighted, threshold-free):

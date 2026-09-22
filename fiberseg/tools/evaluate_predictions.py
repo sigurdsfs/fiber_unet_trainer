@@ -17,7 +17,9 @@ import csv
 import statistics
 from pathlib import Path
 
+import cv2
 import numpy as np
+from skimage.morphology import skeletonize
 
 from ..config import load_config
 from ..dataset import SPLIT_DIRS, _read_gray, find_pairs
@@ -26,8 +28,16 @@ FIELDNAMES = [
     "image", "split",
     "accuracy", "precision", "recall", "specificity",
     "dice", "iou", "tversky", "f2",
+    "tol_precision", "tol_recall", "tol_f1", "cldice",
     "tp", "fp", "fn", "tn",
 ]
+
+# Pixel radius for the tolerance-aware metrics (tol_*). Fibers are only a few pixels
+# wide, so a 1-2 px disagreement in where the annotator drew the edge - well within
+# normal annotation noise - costs strict dice a large fraction of the fiber. tol_*
+# forgive offsets up to this radius, so the gap between dice and tol_f1 says how much
+# of the "error" is boundary placement rather than missed/phantom fibers.
+DEFAULT_TOLERANCE_PX = 2.0
 
 # Kept separate from FIELDNAMES (not a compute_metrics() output) so callers
 # that derive a "metric names" list from FIELDNAMES[2:] - predict_all.py and
@@ -44,15 +54,62 @@ def gt_foreground_fraction(mask: np.ndarray) -> float:
     return 100.0 * float((mask > 0).mean())
 
 
+def _distance_to(mask: np.ndarray) -> np.ndarray:
+    """Euclidean distance (px) from every pixel to the nearest True pixel of `mask`
+    (all +inf if `mask` is empty)."""
+    if not mask.any():
+        return np.full(mask.shape, np.inf, dtype=np.float32)
+    # distanceTransform measures distance to the nearest ZERO pixel, so invert.
+    return cv2.distanceTransform((~mask).astype(np.uint8), cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
+
+
+def tolerance_metrics(
+    pred: np.ndarray,
+    targ: np.ndarray,
+    tolerance_px: float = DEFAULT_TOLERANCE_PX,
+    eps: float = 1e-8,
+) -> dict[str, float]:
+    """Boundary-tolerant precision/recall/F1 plus clDice for boolean masks.
+
+    * tol_precision: fraction of predicted pixels within `tolerance_px` of a GT pixel.
+    * tol_recall:    fraction of GT pixels within `tolerance_px` of a predicted pixel.
+    * tol_f1:        harmonic mean of the two.
+    * cldice:        centerline dice (Shit et al. 2021) - skeleton of the prediction
+                     inside the GT vs skeleton of the GT inside the prediction. Scores
+                     fiber *topology* (found / broken / phantom), largely independent of
+                     how wide either mask draws the fiber. It is width-tolerant, NOT
+                     offset-tolerant: a thin fiber drawn a couple of px off puts its
+                     skeleton outside the other mask. Use tol_f1 for offset tolerance.
+    """
+    tol_precision = float((_distance_to(targ)[pred] <= tolerance_px).sum()) / (pred.sum() + eps)
+    tol_recall = float((_distance_to(pred)[targ] <= tolerance_px).sum()) / (targ.sum() + eps)
+    tol_f1 = 2 * tol_precision * tol_recall / (tol_precision + tol_recall + eps)
+
+    skel_pred = skeletonize(pred)
+    skel_targ = skeletonize(targ)
+    t_prec = float((skel_pred & targ).sum()) / (skel_pred.sum() + eps)
+    t_sens = float((skel_targ & pred).sum()) / (skel_targ.sum() + eps)
+    cldice = 2 * t_prec * t_sens / (t_prec + t_sens + eps)
+
+    return {
+        "tol_precision": tol_precision,
+        "tol_recall": tol_recall,
+        "tol_f1": tol_f1,
+        "cldice": cldice,
+    }
+
+
 def compute_metrics(
     pred_mask: np.ndarray,
     gt_mask: np.ndarray,
     alpha: float = 0.3,
     beta: float = 0.7,
     eps: float = 1e-8,
+    tolerance_px: float = DEFAULT_TOLERANCE_PX,
 ) -> dict[str, float]:
     """Binary segmentation metrics for one image, using the same tp/fp/fn formulas as
-    `lit_module._stats_from_counts` plus classic accuracy/specificity/confusion counts.
+    `lit_module._stats_from_counts` plus classic accuracy/specificity/confusion counts,
+    and the boundary-tolerant / topology metrics from `tolerance_metrics`.
     """
     if pred_mask.shape != gt_mask.shape:
         raise ValueError(
@@ -77,6 +134,7 @@ def compute_metrics(
         "iou": tp / (tp + fp + fn + eps),
         "tversky": tp / (tp + alpha * fp + beta * fn + eps),
         "f2": (5 * tp) / (5 * tp + 4 * fn + fp + eps),
+        **tolerance_metrics(pred, targ, tolerance_px=tolerance_px, eps=eps),
         "tp": tp,
         "fp": fp,
         "fn": fn,

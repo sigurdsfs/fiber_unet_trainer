@@ -144,15 +144,21 @@ def resolve_trainer_settings(
     elif accelerator == "gpu" and not cuda_available:
         raise RuntimeError("CUDA was requested but is not available on this machine.")
 
+    # NOTE: "32-true" (the TrainConfig default) is silently promoted to fp16 AMP on GPU,
+    # so a config saying "32-true" does NOT train in fp32. Set "bf16-mixed" explicitly on
+    # Ampere+ GPUs: same speed as fp16, but no loss scaling and no fp16 overflow risk.
     if accelerator == "gpu" and precision == "32-true":
         precision = "16-mixed"
 
     return accelerator, devices, precision
 
 
-def run_training(cfg: AppConfig):
-    pl.seed_everything(cfg.data.seed, workers=True)
+def _training_seed(cfg: AppConfig) -> int:
+    """train.seed if set, else data.seed (see TrainConfig.seed)."""
+    return cfg.train.seed if cfg.train.seed is not None else cfg.data.seed
 
+
+def run_training(cfg: AppConfig):
     if getattr(cfg, "sweep", None):
         _print_sweep_summary(cfg)
 
@@ -280,6 +286,9 @@ def _log_run_provenance(cfg: AppConfig, logger: MLFlowLogger | None) -> None:
 
 
 def _run_single_training(cfg: AppConfig):
+    # Seeded per run (not once before the sweep loop) so every sweep combination starts
+    # from its own seed - required for a train.seed sweep to mean anything.
+    pl.seed_everything(_training_seed(cfg), workers=True)
 
     if cfg.train.matmul_precision:
         torch.set_float32_matmul_precision(cfg.train.matmul_precision)

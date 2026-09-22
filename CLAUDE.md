@@ -157,6 +157,15 @@ other performance changes.
 `_set_nested`). This means `python -m fiberseg.train --config <cfg-with-sweep-section>` already runs
 a full grid.
 
+Seeding: `train.seed` (weight init / augmentation / shuffling) is separate from `data.seed`
+(which fixes the split); it falls back to `data.seed` when null, and `_run_single_training`
+reseeds per sweep combination - so `sweep: {train.seed: [1, 2, 3]}` repeats a run on the
+same split to measure run-to-run noise. Precision: `train.precision: "32-true"` (the default)
+is silently promoted to `"16-mixed"` on GPU by `resolve_trainer_settings`; the configs under
+[configs/proxy/](fiber_unet_trainer/configs/proxy/) set `"bf16-mixed"` explicitly. Those proxy
+configs (Unet/resnet34, 3 seeds each, one change per arm vs `resnet34_baseline.yaml`) are the
+cheap way to A/B an idea before a multi-day full-size run.
+
 [fiberseg/sweep.py](fiber_unet_trainer/fiberseg/sweep.py) is a second, separate sweep runner: it
 also cartesian-products `cfg.sweep`, sets one combination's values on a deep copy, wraps each run in
 its own `mlflow.start_run(...)`, and then calls `run_training(cfg)` from train.py — but it does not
@@ -214,10 +223,25 @@ small-hole filling via `postprocess_mask()`, applied to a `predict_all.py`/`pred
 prediction folder and re-scored against ground truth into its own `metrics.csv`, with a
 before/after mean-metric comparison printed if the raw predictions were already scored), and the
 performance tooling from [IMPROVEMENTS.md](fiber_unet_trainer/IMPROVEMENTS.md):
-`tune_threshold.py` (sweep `train.threshold` on val, no retrain), `rank_uncertainty.py`
+`tune_threshold.py` (sweep `train.threshold` on val, no retrain; tuning picks from the linear
+`--steps` grid, while logit-spaced tail thresholds are added only so the PR curve / average
+precision covers the full recall range), `rank_uncertainty.py`
 (active-learning ranking of unlabeled images), `compute_dataset_stats.py` (train-split mean/std
 for `image_normalization: "dataset"`), and `extract_micronet_weights.py` (snapshot MicroNet
 encoder weights so smp can be un-downgraded).
+
+Evaluation / data-quality tooling: `compute_metrics` (and therefore every `metrics.csv`) also
+reports boundary-tolerant `tol_precision`/`tol_recall`/`tol_f1` (default 2 px,
+`DEFAULT_TOLERANCE_PX`) and `cldice` (width-tolerant, not offset-tolerant). `compare_runs.py`
+does a paired bootstrap between two sets of `metrics.csv` files (several per side = seeds,
+averaged per image) - use it rather than eyeballing single-run differences.
+`error_overlays.py` renders TP/FP/FN overlays for the worst images of a `predict_all` run;
+`annotator_agreement.py` scores two mask folders against each other (label-quality ceiling).
+`standardize_pixel_size.py` resamples images+masks to one nm/px into a NEW folder (originals
+untouched, filenames and pair set preserved so the split is identical; images without a known
+pixel size are copied unscaled unless given via `--overrides`), writing
+`pixel_size_manifest.csv`. Models trained on that output need inference inputs at the same
+nm/px - `predict_tiles` does not resample.
 
 ### MLflow
 
