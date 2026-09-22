@@ -26,6 +26,41 @@ from ..dataset import _normalize_image, _read_gray, find_pairs
 from ..predict_tiles import load_predictor, predict_prob
 
 
+def _tuning_grid(steps: int) -> np.ndarray:
+    """The `steps` evenly spaced candidate thresholds in (0, 1) that tuning picks from."""
+    return np.linspace(0.0, 1.0, steps + 2)[1:-1]
+
+
+def _threshold_grid(steps: int) -> np.ndarray:
+    """Tuning grid plus logit-spaced tails reaching ~1e-7 from 0 and 1.
+
+    The tails exist for the precision-recall curve only. A recall-weighted model pushes
+    most fiber pixels to probabilities > 0.99, so a linear grid stopping at 0.99 never
+    reaches the low-recall end of the curve and the integrated area came out far too
+    small (e.g. AUC-PR 0.27 next to a best dice of 0.68, which is impossible for a real
+    curve). Tuning still only picks from `_tuning_grid` - see `_best_index`.
+    """
+    tails = 1.0 / (1.0 + np.exp(-np.linspace(-16.0, 16.0, 321)))
+    return np.unique(np.concatenate([_tuning_grid(steps), tails]))
+
+
+def _best_index(thresholds: np.ndarray, score: np.ndarray, steps: int) -> int:
+    """Index into `thresholds` of the best-scoring threshold on the tuning grid."""
+    candidates = np.flatnonzero(np.isin(thresholds, _tuning_grid(steps)))
+    return int(candidates[np.argmax(score[candidates])])
+
+
+def average_precision(precision: np.ndarray, recall: np.ndarray) -> float:
+    """Step-wise average precision, AP = sum_n (R_n - R_{n+1}) * P_n over thresholds in
+    increasing order, with the curve closed at recall 0 by the precision of the highest
+    threshold (the sklearn `average_precision_score` convention). Step-wise rather than
+    trapezoidal, which overestimates area between sparse PR points."""
+    order = np.argsort(recall)
+    r = np.concatenate([[0.0], np.asarray(recall)[order]])
+    p = np.asarray(precision)[order]
+    return float(np.sum(np.diff(r) * p))
+
+
 def _counts_at(prob: np.ndarray, gt: np.ndarray, thresholds: np.ndarray):
     """tp/fp/fn for every threshold at once, accumulated over one image."""
     fiber = gt > 0
@@ -59,7 +94,7 @@ def sweep_thresholds(cfg, model, device, *, split="val", steps=99, verbose=True,
     if not pairs:
         raise SystemExit(f"No images in split {split!r}.")
 
-    thresholds = np.linspace(0.0, 1.0, steps + 2)[1:-1]
+    thresholds = _threshold_grid(steps)
     tp = np.zeros_like(thresholds, dtype=np.float64)
     fp = np.zeros_like(thresholds, dtype=np.float64)
     fn = np.zeros_like(thresholds, dtype=np.float64)
@@ -103,7 +138,8 @@ def sweep_thresholds(cfg, model, device, *, split="val", steps=99, verbose=True,
 
 def plot_pr_curve(thresholds, metrics, best_threshold, out_path, *, title=None):
     """Plot the precision-recall curve traced out by `sweep_thresholds` and save it to
-    `out_path`. Returns the area under the curve (AUC-PR).
+    `out_path`. Returns the area under the curve as average precision (see
+    `average_precision`).
 
     Precision-recall, not ROC, because fiber masks are sparse (mostly-background pixels):
     ROC-AUC stays misleadingly high under that imbalance since it's dominated by the huge
@@ -117,20 +153,16 @@ def plot_pr_curve(thresholds, metrics, best_threshold, out_path, *, title=None):
     precision = np.asarray(metrics["precision"])
     recall = np.asarray(metrics["recall"])
 
-    # Sort by recall ascending, then integrate via the trapezoid rule by hand (rather
-    # than np.trapz/np.trapezoid, whose name changed across numpy versions).
     order = np.argsort(recall)
     recall_sorted = recall[order]
     precision_sorted = precision[order]
-    auc = float(np.sum(
-        np.diff(recall_sorted) * (precision_sorted[:-1] + precision_sorted[1:]) / 2.0
-    ))
+    auc = average_precision(precision, recall)
 
     best_idx = int(np.argmin(np.abs(thresholds - best_threshold)))
 
     fig, ax = plt.subplots(figsize=(6, 5))
-    ax.plot(recall_sorted, precision_sorted, color="#2E7A74", linewidth=2)
-    ax.fill_between(recall_sorted, precision_sorted, alpha=0.15, color="#2E7A74")
+    ax.step(recall_sorted, precision_sorted, where="post", color="#2E7A74", linewidth=2)
+    ax.fill_between(recall_sorted, precision_sorted, step="post", alpha=0.15, color="#2E7A74")
     ax.scatter(
         [recall[best_idx]], [precision[best_idx]],
         color="#B97A2A", zorder=5,
@@ -169,8 +201,7 @@ def find_best_threshold(
     thresholds, metrics, _ = sweep_thresholds(
         cfg, model, device, split=split, steps=steps, verbose=verbose, ridge=ridge
     )
-    score = metrics[metric]
-    best = int(np.argmax(score))
+    best = _best_index(thresholds, metrics[metric], steps)
     stats = {k: float(v[best]) for k, v in metrics.items()}
     return float(thresholds[best]), stats, thresholds, metrics
 
@@ -217,7 +248,7 @@ def main():
         cfg, model, device, split=args.split, steps=args.steps, ridge=args.ridge
     )
     score = metrics[args.metric]
-    best = int(np.argmax(score))
+    best = _best_index(thresholds, score, args.steps)
 
     target_key = "inference.ridge_threshold" if args.ridge else "train.threshold"
     swept_over = (

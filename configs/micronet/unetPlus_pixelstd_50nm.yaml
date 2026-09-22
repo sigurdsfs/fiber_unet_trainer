@@ -1,0 +1,115 @@
+# FULL-SIZE version of configs/proxy/resnet34_pixelstd_50nm.yaml - run only once the proxy
+# shows a gain whose compare_runs CI excludes 0. Same one change as that proxy arm, on the
+# baseline model (UnetPlusPlus / se_resnet152 / micronet, max_epochs 400, patience 20).
+# Single seed (the full model is too expensive to repeat); compare it against the baseline
+# with fiberseg.tools.compare_runs and read the CI, not the point estimate.
+# Baseline to compare against: configs/micronet/unetPlus_encoder_sweep_improved.yaml
+# (se_resnet152 arm). Note that baseline monitors val/soft_tversky; this one monitors
+# val/soft_dice and trains in bf16-mixed, same as all proxy arms.
+#
+#   python -m fiberseg.train --config configs/micronet/unetPlus_pixelstd_50nm.yaml
+
+mlflow:
+  tracking_uri: "http://127.0.0.1:5000"
+  experiment_name: "fiber-sem-full-pixelstd-50nm"
+  run_name: null
+
+data:
+  images_dir: "../Current Training Material - fibers only - Preproc/PixelSize_50nm/Images"   # CHANGED
+  masks_dir: "../Current Training Material - fibers only - Preproc/PixelSize_50nm/Masks"     # CHANGED
+  image_glob: "*.tif"
+  mask_pattern: "{stem}_mask.tif"
+  image_channels: 3
+  image_normalization: "imagenet"
+  patch_size: 512
+  stride: 384
+  batch_size: 8
+  num_workers: 4
+  seed: 42                    # fixes the SPLIT - keep identical across all arms
+  split:
+    train: 0.7
+    val: 0.15
+    test: 0.15
+  tile_sampling: "static"
+  min_foreground_fraction: 0.001
+  keep_empty_probability: 0.25
+
+model:
+  architecture: "UnetPlusPlus"
+  encoder_name: "se_resnet152"
+  encoder_weights: "micronet"
+  in_channels: 3
+  classes: 1
+
+train:
+  max_epochs: 400
+  early_stopping:
+    patience: 20
+    min_delta: 0.0005
+  learning_rate: 0.00025
+  encoder_lr_ratio: 0.1
+  weight_decay: 0.0001
+  accelerator: "auto"
+  devices: "auto"
+  precision: "bf16-mixed"
+  threshold: 0.5
+
+  monitor_metric: "val/soft_dice"
+  monitor_mode: "max"
+
+  loss:
+    name: "bce_focal_tversky"
+    tversky_alpha: 0.4
+    tversky_beta: 0.7
+    focal_gamma: 0.75
+    cldice_weight: 0.25
+    cldice_iters: 5
+
+  scheduler:
+    name: "reduce_on_plateau"
+    patience: 5
+    factor: 0.5
+    min_lr: 0.000001
+
+  swa: false
+  swa_lr: 0.0001
+
+  matmul_precision: "medium"
+  log_every_n_steps: 10
+  val_check_interval: 1.0
+  deterministic: false
+  profiler: null
+  model_export_path: null
+
+inference:
+  batch_size: 8
+  tile_blend: "gaussian"
+  reflect_pad: true
+  tta: true
+  threshold_mode: "fixed"
+
+augmentations:
+  train:
+    - name: HorizontalFlip
+      p: 0.5
+    - name: VerticalFlip
+      p: 0.5
+    - name: RandomRotate90
+      p: 0.5
+    - name: Affine
+      scale: [0.75, 1.35]
+      translate_percent: [-0.05, 0.05]
+      rotate: [-15, 15]
+      p: 0.5
+    - name: RandomBrightnessContrast
+      brightness_limit: 0.15
+      contrast_limit: 0.15
+      p: 0.4
+    - name: GaussNoise
+      std_range: [0.02, 0.08]
+      p: 0.3
+    - name: GaussianBlur
+      blur_limit: [3, 5]
+      p: 0.2
+  val: []
+  test: []

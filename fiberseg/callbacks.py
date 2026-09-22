@@ -52,7 +52,7 @@ class HardNegativeMiningCallback(pl.Callback):
         if sampler is None or not self._indices:
             return
         indices = torch.cat(self._indices).numpy()
-        losses = torch.cat(self._losses).numpy()
+        losses = torch.cat(self._losses).float().numpy()  # bf16 has no numpy dtype
         sampler.update_difficulty(indices, losses)
 
 
@@ -300,7 +300,7 @@ def _log_prediction_samples(
 
             with torch.no_grad():
                 logits = model(img_batch)
-                prob = torch.sigmoid(logits)[0, 0].detach().cpu()
+                prob = torch.sigmoid(logits.float())[0, 0].detach().cpu()
                 pred = (prob > threshold).float()
 
             fig = _make_figure(
