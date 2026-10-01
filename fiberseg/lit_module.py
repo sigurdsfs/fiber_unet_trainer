@@ -10,6 +10,7 @@ import torch.nn.functional as F
 
 from .config import ModelConfig, TrainConfig, to_dict
 from .models import create_model
+from .tuned_thresholds import TUNED_KEY
 
 
 def _confusion_counts(
@@ -170,6 +171,7 @@ class FiberSegmentationLitModule(pl.LightningModule):
         self.model_cfg = model_cfg
         self.train_cfg = train_cfg
         self.save_hyperparameters({"model": to_dict(model_cfg), "train": to_dict(train_cfg)})
+        self.tuned_thresholds = None
         self.model = create_model(model_cfg)
         self.bce = nn.BCEWithLogitsLoss()
         self.dice = smp.losses.DiceLoss(mode="binary", from_logits=True)
@@ -316,6 +318,9 @@ class FiberSegmentationLitModule(pl.LightningModule):
         for k, v in soft_stats.items():
             self.log(f"val/soft_{k}", v, prog_bar=(k in {"dice", "tversky"}))
             self.log(f"val_soft_{k}", v)
+
+    def on_load_checkpoint(self, checkpoint):
+        self.tuned_thresholds = checkpoint.get(TUNED_KEY)
 
     def on_test_epoch_start(self):
         self._test_tp = 0.0

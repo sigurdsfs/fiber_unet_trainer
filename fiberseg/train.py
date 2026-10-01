@@ -10,6 +10,7 @@ import os
 import re
 import subprocess
 import tempfile
+import traceback
 from datetime import datetime
 from pathlib import Path
 
@@ -33,7 +34,9 @@ from .callbacks import (
 from .config import AppConfig, TrainConfig, load_config, to_dict
 from .dataset import FiberDataModule, split_filenames
 from .lit_module import FiberSegmentationLitModule
+from .tools.auto_tune import auto_tune_checkpoint
 from .tools.export_torchscript import export_torchscript
+from .tuned_thresholds import apply_tuned
 
 def _set_nested(obj: object, dotted_key: str, value: object) -> None:
     parts = dotted_key.split(".")
@@ -75,11 +78,12 @@ def _expand_sweep_configs(cfg: AppConfig) -> list[AppConfig]:
         return [cfg]
 
     expanded: list[AppConfig] = []
+    base_name = cfg.mlflow.run_name
     for combo_map, suffix_parts in _iter_sweep_combinations(cfg):
         new_cfg = copy.deepcopy(cfg)
         for key, value in combo_map.items():
             _set_nested(new_cfg, key, value)
-        new_cfg.mlflow.run_name = " | ".join(suffix_parts)
+        new_cfg.mlflow.run_name = " | ".join(([base_name] if base_name else []) + suffix_parts)
         expanded.append(new_cfg)
     return expanded
 
@@ -340,6 +344,7 @@ def _run_single_training(cfg: AppConfig):
         experiment_name=cfg.mlflow.experiment_name,
         run_name=run_name,
         tracking_uri=cfg.mlflow.tracking_uri,
+        tags={**cfg.mlflow.tags, "seed": str(_training_seed(cfg))},
     )
 
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -482,6 +487,24 @@ def _run_single_training(cfg: AppConfig):
     _log_filtered_tile_stats(cfg, datamodule, logger)
 
     trainer.test(model, datamodule=datamodule, ckpt_path="best")
+
+    best_ckpt = best_checkpoint_callback.best_model_path
+    if cfg.train.auto_tune_threshold and best_ckpt:
+        # A tuning failure must not take a finished run (or the rest of a sweep) down
+        # with it - the checkpoint is intact and tools.auto_tune can backfill it.
+        try:
+            tuned = auto_tune_checkpoint(
+                cfg, best_ckpt, checkpoint_dir,
+                client=logger.experiment, run_id=logger.run_id,
+            )
+            apply_tuned(cfg, tuned)
+        except Exception:
+            traceback.print_exc()
+            print(
+                "Warning: threshold auto-tuning failed; backfill with "
+                f"python -m fiberseg.tools.auto_tune --config <cfg> --checkpoint {best_ckpt} "
+                f"--run-id {logger.run_id}"
+            )
 
     _log_run_provenance(cfg, logger)
 

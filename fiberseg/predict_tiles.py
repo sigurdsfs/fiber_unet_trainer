@@ -19,6 +19,7 @@ from PIL import Image
 from .config import AppConfig, load_config
 from .dataset import _apply_channel_norm, _hw, _normalize_image, _read_gray
 from .lit_module import FiberSegmentationLitModule
+from .tuned_thresholds import apply_tuned
 
 # 8 dihedral (flip/rotate) transforms for test-time augmentation. Each entry is
 # (forward, inverse): forward maps a tile into an augmented view, inverse maps a
@@ -259,7 +260,12 @@ def predict_mask(
     over the probability map and thresholds that response at `cfg.inference.ridge_threshold`,
     scoring how ridge-like a neighbourhood is rather than how bright a single pixel is.
     """
-    prob = predict_prob(img, model, cfg, device)
+    return binarize_prob(predict_prob(img, model, cfg, device), cfg).astype(np.uint8) * 255
+
+
+def binarize_prob(prob: np.ndarray, cfg: AppConfig) -> np.ndarray:
+    """Boolean mask from a probability map per `cfg.inference.threshold_mode`
+    (see `predict_mask`)."""
     mode = cfg.inference.threshold_mode
     if mode == "hysteresis":
         # Local import: fiber_gap_repair imports save_mask from this module, so importing
@@ -286,16 +292,24 @@ def predict_mask(
             f"Unsupported inference.threshold_mode={mode!r}. "
             "Use 'fixed', 'hysteresis' or 'ridge'."
         )
-    return mask.astype(np.uint8) * 255
+    return np.asarray(mask, dtype=bool)
 
 
 def load_predictor(checkpoint: str, cfg: AppConfig) -> tuple[FiberSegmentationLitModule, torch.device]:
-    """Load a checkpoint in eval mode onto CUDA if available, else CPU."""
+    """Load a checkpoint in eval mode onto CUDA if available, else CPU.
+
+    If the checkpoint carries validation-tuned thresholds (written after training by
+    `tools.auto_tune`), they are applied to `cfg` in place, overriding the config's
+    values - see `tuned_thresholds.apply_tuned`.
+    """
     model = FiberSegmentationLitModule.load_from_checkpoint(
         checkpoint,
         model_cfg=cfg.model,
         train_cfg=cfg.train,
     )
+    applied = apply_tuned(cfg, model.tuned_thresholds)
+    if applied:
+        print("Using validation-tuned thresholds from checkpoint: " + "; ".join(applied))
     model.eval()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

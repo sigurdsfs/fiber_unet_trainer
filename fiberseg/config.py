@@ -97,6 +97,24 @@ def _validate_inference(inf_cfg: dict[str, Any]) -> None:
             raise ValueError("inference.ridge_sigmas must all be > 0.")
 
 
+_VALID_TUNE_METRICS = {"dice", "iou", "f2", "tversky"}
+
+
+def _validate_auto_tune(train_cfg: dict[str, Any]) -> None:
+    modes = train_cfg.get("auto_tune_modes", ["fixed"])
+    bad = sorted(set(modes) - _VALID_THRESHOLD_MODES)
+    if bad or not modes:
+        raise ValueError(
+            f"train.auto_tune_modes must be a non-empty subset of "
+            f"{sorted(_VALID_THRESHOLD_MODES)}; got {modes!r}."
+        )
+    metric = train_cfg.get("auto_tune_metric", "dice")
+    if metric not in _VALID_TUNE_METRICS:
+        raise ValueError(
+            f"train.auto_tune_metric must be one of {sorted(_VALID_TUNE_METRICS)}; got {metric!r}."
+        )
+
+
 def _validate_loss(loss_cfg: dict[str, Any]) -> None:
     if float(loss_cfg.get("focal_bce_weight", 0.0)) < 0:
         raise ValueError("train.loss.focal_bce_weight must be >= 0.")
@@ -401,12 +419,26 @@ class TrainConfig:
     # experiment and run name. Leave null to skip export.
     model_export_path: str | None = None
 
+    # After training, tune each listed inference.threshold_mode on the VALIDATION split
+    # (best checkpoint, full-image tiled inference), score it on the test split at the
+    # tuned values, and store the tuned values in the best checkpoint + MLflow
+    # (see fiberseg.tools.auto_tune). load_predictor then applies them automatically;
+    # inference.threshold_mode still chooses which mode is used to predict.
+    auto_tune_threshold: bool = True
+    auto_tune_modes: list[str] = field(
+        default_factory=lambda: ["fixed", "hysteresis", "ridge"]
+    )
+    auto_tune_metric: str = "dice"
+
 
 @dataclass
 class MlflowConfig:
     tracking_uri: str = "http://127.0.0.1:5000"
     experiment_name: str = "fiber-sem-segmentation"
     run_name: str | None = None
+    # Extra MLflow run tags (e.g. {arm: baseline}) - group/filter by them in the UI
+    # and in fiberseg.tools.summarize_experiment.
+    tags: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -494,6 +526,7 @@ def load_config(path: str | Path) -> AppConfig:
     _validate_normalization(data_cfg)
     _validate_sampling(data_cfg)
     _validate_loss((raw.get("train", {}) or {}).get("loss", {}) or {})
+    _validate_auto_tune(raw.get("train", {}) or {})
     _validate_inference(raw.get("inference", {}) or {})
 
     return AppConfig(

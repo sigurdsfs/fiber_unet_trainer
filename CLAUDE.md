@@ -23,6 +23,11 @@ pip install --no-deps "pretrained_microscopy_models @ git+https://github.com/nas
 
 # Local MLflow UI (start before training so runs are logged/visible)
 start_mlflow.bat             # serves at http://127.0.0.1:5000
+# On Linux (e.g. training over SSH), use start_mlflow.sh / run_training.sh instead -
+# they launch into persistent sessions on the dedicated `tmux -L fiber` server
+# (started without D-Bus so systemd-oomd can't kill the panes; always pass -L fiber).
+# run_training.sh [-n session] cfg1 [cfg2 ...] queues configs. See
+# Documents/REMOTE_TRAINING_WORKFLOW.md for the full SSH/VSCode remote setup.
 
 # Train a single model
 python -m fiberseg.train --config configs/example.yaml
@@ -59,9 +64,8 @@ Everything is driven by one YAML file (see [configs/example.yaml](fiber_unet_tra
 [fiberseg/config.py](fiber_unet_trainer/fiberseg/config.py) loads it into a nested dataclass
 `AppConfig` (`data`, `model`, `train`, `mlflow`, `logging`, plus raw `augmentations`/`sweep` dicts).
 `load_config` validates `data.images_dir`/`masks_dir` are present and that `data.split` fractions
-sum to 1. Unknown YAML keys under a section are silently dropped (`_dataclass_from_dict` filters to
-known dataclass fields) rather than erroring — keep this in mind when a config value seems to have
-no effect. `to_dict()` round-trips an `AppConfig` back to plain dict/list for logging the resolved
+sum to 1. Unknown YAML keys (top-level sections or keys within a section) raise a `ValueError`
+(`_dataclass_from_dict` is deliberately strict), so a typo'd key fails loudly. `to_dict()` round-trips an `AppConfig` back to plain dict/list for logging the resolved
 config as an MLflow artifact.
 
 ### Data flow: pairing → tiling → dataset
@@ -172,6 +176,31 @@ its own `mlflow.start_run(...)`, and then calls `run_training(cfg)` from train.p
 clear `cfg.sweep` on that copy first, so `run_training` will detect the sweep section is still
 present and expand the *entire original grid again* inside each outer iteration. Read both files
 before changing sweep behavior; don't assume `python -m fiberseg.sweep` runs the grid exactly once.
+
+### Post-training threshold auto-tuning
+
+After `trainer.test`, `_run_single_training` calls `tools.auto_tune.auto_tune_checkpoint`
+(`train.auto_tune_threshold`, default on): for every mode in `train.auto_tune_modes`
+(default fixed/hysteresis/ridge) it tunes the decision rule on the **validation** split
+(maximizing `train.auto_tune_metric`, full-image tiled inference, each probability map
+computed once and shared by all modes; hysteresis via the exact-but-fast
+`tune_hysteresis_threshold.hysteresis_counts`), then scores every mode plus the untuned
+`fixed-untuned` reference per image on **test**. Results go to the checkpoint dir
+(`tuned_thresholds.json`, `test_metrics_<mode>.csv` - compare_runs-compatible) and MLflow
+(`tuned_test/<mode>/<metric>`, `tuned_val/...`, params `tuned.<mode>.*`, tag
+`val_best_threshold_mode`), and the tuned values are **embedded in the best checkpoint**
+under `tuned_thresholds.TUNED_KEY`. `lit_module.on_load_checkpoint` reads them and
+`predict_tiles.load_predictor` (and `export_torchscript`) apply them to the cfg, so any
+later prediction uses the tuned values; `inference.threshold_mode` still picks the mode.
+Note the Lightning `test/*` metrics are tile-based at the config threshold - the
+`tuned_test/*` ones are the full-image, deployment-realistic numbers. Tuning failures are
+caught (a finished run is never lost); backfill any checkpoint with
+`python -m fiberseg.tools.auto_tune --config <cfg> --checkpoint <best.ckpt> [--run-id <id>]`.
+
+Multi-arm studies (e.g. [configs/proxy/scratch_ablation/](fiber_unet_trainer/configs/proxy/scratch_ablation/))
+tag runs with `mlflow.tags.arm`; a sweep keeps `mlflow.run_name` as a prefix
+(`"01 loss-balanced | seed=2"`). `tools/summarize_experiment.py` builds the
+arm x threshold-mode table and a paired bootstrap of every arm vs the baseline arm.
 
 ### Inference and export
 
