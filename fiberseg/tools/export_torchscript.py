@@ -21,6 +21,7 @@ import yaml
 from ..config import load_config, to_dict
 from ..dataset import _hw
 from ..lit_module import FiberSegmentationLitModule
+from ..tuned_thresholds import apply_tuned
 from .tune_threshold import find_best_threshold, plot_pr_curve
 
 
@@ -122,6 +123,9 @@ def export_torchscript(
         train_cfg=cfg.train,
         map_location=device,
     )
+    applied = apply_tuned(cfg, lit_model.tuned_thresholds)
+    if applied:
+        print("Using validation-tuned thresholds from checkpoint: " + "; ".join(applied))
 
     lit_model.eval()
     lit_model.to(device)

@@ -1,0 +1,149 @@
+# SCRATCH ABLATION (round 1) - arm 01 loss-balanced: ONE change vs 00_baseline.yaml:
+#   tversky alpha/beta 0.4/0.7 -> 0.5/0.5
+#
+# (Shared header below describes the whole study.)
+#
+# Question: which change reduces false-positive "fibres" on filter scratches (test
+# precision ~0.41 at recall ~0.74 on the full model) without giving up recall?
+#
+# Every arm in this folder is a copy of this file with exactly ONE change, marked
+# "# CHANGED". All arms share: the same split (data.seed 42), model (Unet/resnet34/
+# imagenet - the cheap proxy for the full UNet++/se_resnet152), augmentations,
+# schedule and seeds (train.seed 1/2/3), and log to ONE MLflow experiment so they sit
+# side by side. Runs are named "<arm> | seed=<n>" and tagged arm=<arm>.
+#
+# Threshold modes are NOT training arms - fixed/hysteresis/ridge only change how the
+# probability map is binarized. Every run auto-tunes all three on the validation split
+# after training and reports each on test (MLflow metrics tuned_test/<mode>/<metric>),
+# so each arm yields an arm x mode table for free.
+#
+# Arms:
+#   00_baseline              control
+#   01_loss-balanced         tversky alpha/beta 0.4/0.7 -> 0.5/0.5 (stop rewarding recall)
+#   02_data-50nm             images/masks resampled to 50 nm/px
+#   03_loss-no-cldice        cldice_weight 0.25 -> 0 (stop rewarding "connect everything")
+#   04_sampling-hardneg      weighted tile sampling + hard-negative mining
+#   05_tiles-keep-all-empty  keep_empty_probability 0.25 -> 1.0 (all scratch-only tiles)
+#   06_patch-768             patch 512/stride 384 -> 768/576 (more context per tile)
+#
+# Run all (two parallel lanes on the one GPU):
+#   ./run_training.sh -n ablation_a configs/proxy/scratch_ablation/0{0,2,4,6}_*.yaml
+#   ./run_training.sh -n ablation_b configs/proxy/scratch_ablation/0{1,3,5}_*.yaml
+# Compare afterwards:
+#   python -m fiberseg.tools.summarize_experiment --experiment proxy-r34-scratch-ablation
+
+mlflow:
+  tracking_uri: "http://127.0.0.1:5000"
+  experiment_name: "proxy-r34-scratch-ablation"
+  run_name: "01 loss-balanced"
+  tags:
+    arm: "01 loss-balanced"
+    change: "tversky alpha/beta 0.4/0.7 -> 0.5/0.5"
+    study: "scratch-ablation-r1"
+
+data:
+  images_dir: "../Current Training Material - fibers only - Preproc/Images"
+  masks_dir: "../Current Training Material - fibers only - Preproc/Masks"
+  image_glob: "*.tif"
+  mask_pattern: "{stem}_mask.tif"
+  image_channels: 3
+  image_normalization: "imagenet"
+  patch_size: 512
+  stride: 384
+  batch_size: 8
+  num_workers: 16
+  seed: 42                    # fixes the SPLIT - keep identical across all arms
+  split:
+    train: 0.7
+    val: 0.15
+    test: 0.15
+  tile_sampling: "static"
+  min_foreground_fraction: 0.001
+  keep_empty_probability: 0.25
+
+model:
+  architecture: "Unet"
+  encoder_name: "resnet34"
+  encoder_weights: "imagenet"
+  in_channels: 3
+  classes: 1
+
+train:
+  max_epochs: 80
+  early_stopping:
+    patience: 12
+    min_delta: 0.0005
+  learning_rate: 0.00025
+  encoder_lr_ratio: 0.1
+  weight_decay: 0.0001
+  accelerator: "auto"
+  devices: "auto"
+  precision: "bf16-mixed"
+  threshold: 0.5
+
+  monitor_metric: "val/soft_dice"
+  monitor_mode: "max"
+
+  loss:
+    name: "bce_focal_tversky"
+    tversky_alpha: 0.5          # CHANGED (control: 0.4)
+    tversky_beta: 0.5           # CHANGED (control: 0.7)
+    focal_gamma: 0.75
+    cldice_weight: 0.25
+    cldice_iters: 5
+
+  scheduler:
+    name: "reduce_on_plateau"
+    patience: 5
+    factor: 0.5
+    min_lr: 0.000001
+
+  swa: false
+  swa_lr: 0.0001
+
+  matmul_precision: "medium"
+  log_every_n_steps: 10
+  val_check_interval: 1.0
+  deterministic: false
+  profiler: null
+  model_export_path: null
+
+  auto_tune_threshold: true
+  auto_tune_modes: ["fixed", "hysteresis", "ridge"]
+  auto_tune_metric: "dice"
+
+inference:
+  batch_size: 8
+  tile_blend: "gaussian"
+  reflect_pad: true
+  tta: true
+  threshold_mode: "fixed"
+
+augmentations:
+  train:
+    - name: HorizontalFlip
+      p: 0.5
+    - name: VerticalFlip
+      p: 0.5
+    - name: RandomRotate90
+      p: 0.5
+    - name: Affine
+      scale: [0.75, 1.35]
+      translate_percent: [-0.05, 0.05]
+      rotate: [-15, 15]
+      p: 0.5
+    - name: RandomBrightnessContrast
+      brightness_limit: 0.15
+      contrast_limit: 0.15
+      p: 0.4
+    - name: GaussNoise
+      std_range: [0.02, 0.08]
+      p: 0.3
+    - name: GaussianBlur
+      blur_limit: [3, 5]
+      p: 0.2
+  val: []
+  test: []
+
+sweep:
+  train.seed: [1, 2, 3]

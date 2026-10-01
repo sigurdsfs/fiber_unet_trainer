@@ -1,0 +1,139 @@
+# SCRATCH ABLATION (round 2: combinations) - arm 08 hardneg+no-cldice
+#
+# Combines round-1 winners to test for synergy. Factors vs 00_baseline.yaml:
+#   [H] 04 sampling-hardneg   hard-negative weighted tile sampling
+#   [P] 06 patch-768          768/576 tiles
+#   [C] 03 loss-no-cldice     cldice_weight 0
+#   [N] 02 data-50nm          50 nm/px data (exploratory; only in the all-four arm)
+# This arm: [H] hard-negative sampling, [C] cldice off
+#
+# H/P/C form a full 2^3 factorial together with round 1 (00, 03, 04, 06 are the
+# other cells), all on the same split and seeds, in the same MLflow experiment.
+# Synergy = a combination beating its best single component, read with
+#   python -m fiberseg.tools.summarize_experiment --experiment proxy-r34-scratch-ablation \
+#       --baseline-arm "<best single component arm>"
+#
+# Round 1 found hysteresis the best threshold mode and ridge unusable on a
+# saturated probability map, so predictions default to hysteresis and ridge is
+# no longer tuned. Neither changes training.
+
+mlflow:
+  tracking_uri: "http://127.0.0.1:5000"
+  experiment_name: "proxy-r34-scratch-ablation"
+  run_name: "08 hardneg+no-cldice"
+  tags:
+    arm: "08 hardneg+no-cldice"
+    change: "hard-negative sampling + cldice off"
+    study: "scratch-ablation-r2"
+
+data:
+  images_dir: "../Current Training Material - fibers only - Preproc/Images"
+  masks_dir: "../Current Training Material - fibers only - Preproc/Masks"
+  image_glob: "*.tif"
+  mask_pattern: "{stem}_mask.tif"
+  image_channels: 3
+  image_normalization: "imagenet"
+  patch_size: 512
+  stride: 384
+  batch_size: 8
+  num_workers: 16
+  seed: 42                    # fixes the SPLIT - keep identical across all arms
+  split:
+    train: 0.7
+    val: 0.15
+    test: 0.15
+  tile_sampling: "weighted"            # CHANGED [H] (control: static)
+  min_foreground_fraction: 0.001       # in weighted mode: defines positive tiles
+  keep_empty_probability: 0.25         # inert under weighted sampling
+  negative_ratio: 1.0                  # CHANGED [H]
+  negative_ratio_final: 2.0            # CHANGED [H]
+  negative_ratio_anneal_epochs: 10     # CHANGED [H]
+  hard_negative_fraction: 0.5          # CHANGED [H]
+  hard_negative_warmup_epochs: 8       # CHANGED [H]
+
+model:
+  architecture: "Unet"
+  encoder_name: "resnet34"
+  encoder_weights: "imagenet"
+  in_channels: 3
+  classes: 1
+
+train:
+  max_epochs: 80
+  early_stopping:
+    patience: 12
+    min_delta: 0.0005
+  learning_rate: 0.00025
+  encoder_lr_ratio: 0.1
+  weight_decay: 0.0001
+  accelerator: "auto"
+  devices: "auto"
+  precision: "bf16-mixed"
+  threshold: 0.5
+
+  monitor_metric: "val/soft_dice"
+  monitor_mode: "max"
+
+  loss:
+    name: "bce_focal_tversky"
+    tversky_alpha: 0.4
+    tversky_beta: 0.7
+    focal_gamma: 0.75
+    cldice_weight: 0.0          # CHANGED [C] (control: 0.25)
+    cldice_iters: 5
+
+  scheduler:
+    name: "reduce_on_plateau"
+    patience: 5
+    factor: 0.5
+    min_lr: 0.000001
+
+  swa: false
+  swa_lr: 0.0001
+
+  matmul_precision: "medium"
+  log_every_n_steps: 10
+  val_check_interval: 1.0
+  deterministic: false
+  profiler: null
+  model_export_path: null
+
+  auto_tune_threshold: true
+  auto_tune_modes: ["fixed", "hysteresis"]
+  auto_tune_metric: "dice"
+
+inference:
+  batch_size: 8
+  tile_blend: "gaussian"
+  reflect_pad: true
+  tta: true
+  threshold_mode: "hysteresis"
+
+augmentations:
+  train:
+    - name: HorizontalFlip
+      p: 0.5
+    - name: VerticalFlip
+      p: 0.5
+    - name: RandomRotate90
+      p: 0.5
+    - name: Affine
+      scale: [0.75, 1.35]
+      translate_percent: [-0.05, 0.05]
+      rotate: [-15, 15]
+      p: 0.5
+    - name: RandomBrightnessContrast
+      brightness_limit: 0.15
+      contrast_limit: 0.15
+      p: 0.4
+    - name: GaussNoise
+      std_range: [0.02, 0.08]
+      p: 0.3
+    - name: GaussianBlur
+      blur_limit: [3, 5]
+      p: 0.2
+  val: []
+  test: []
+
+sweep:
+  train.seed: [1, 2, 3]

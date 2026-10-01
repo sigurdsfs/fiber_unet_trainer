@@ -8,14 +8,10 @@ see `tools.fiber_gap_repair.hysteresis_threshold_mask`) instead of the single fi
 `train.threshold`.
 
 Unlike a plain threshold, hysteresis isn't a pointwise cut - a pixel's inclusion depends
-on connectivity to a confident seed region, which changes with both `low` and `high`. That
-rules out `tune_threshold.py`'s O(1)-per-threshold sort/searchsorted trick, so this instead
-grid-searches `(low, high)` pairs directly: each image's probability map is still computed
-once (the expensive, GPU part), but every valid `low < high` combination in the grid is
-evaluated with an actual `apply_hysteresis_threshold` call (cheap, CPU-only, but not free -
-budget for `n_images * n_valid_pairs` calls at roughly 50ms each per megapixel; keep
-`--low-steps`/`--high-steps` modest, or narrow `--low-max`/`--high-min` around a rough
-guess, for a large validation split).
+on connectivity to a confident seed region, which changes with both `low` and `high`. The
+grid is still evaluated exactly, but via `hysteresis_counts`: one connected-component
+labelling per `low`, after which every `high` is scored at once from the components'
+maxima - so cost scales with `--low-steps`, and `--high-steps` is nearly free.
 
 Run:
     python -m fiberseg.tools.tune_hysteresis_threshold --config <cfg> --checkpoint <best.ckpt>
@@ -29,13 +25,52 @@ import argparse
 from pathlib import Path
 
 import numpy as np
+from scipy import ndimage as ndi
 
 from ..config import load_config
 from ..dataset import _normalize_image, _read_gray, find_pairs
 from ..predict_tiles import load_predictor, predict_prob
-from .fiber_gap_repair import hysteresis_threshold_mask
+from .tune_threshold import metrics_from_counts
 
 METRIC_CHOICES = ["dice", "iou", "f2", "tversky"]
+
+
+def hysteresis_counts(prob: np.ndarray, fiber: np.ndarray, lows, highs):
+    """tp/fp/fn of `apply_hysteresis_threshold(prob, low, high)` for every (low, high).
+
+    Exact, but far cheaper than one hysteresis call per pair: hysteresis keeps a
+    connected component of `prob > low` iff its maximum is `> high`, so each `low`
+    needs one `ndi.label` (same default connectivity skimage uses), after which every
+    `high` is a searchsorted over the components' sorted maxima. Returns three
+    `(len(lows), len(highs))` float arrays; cells with low >= high are not meaningful
+    (skimage would clamp low to high there) and must be masked by the caller.
+    """
+    highs = np.asarray(highs, dtype=np.float64)
+    prob_flat = prob.ravel()
+    fiber_flat = fiber.ravel()
+    total = float(fiber_flat.sum())
+    tp = np.zeros((len(lows), len(highs)))
+    fp = np.zeros_like(tp)
+    for li, low in enumerate(lows):
+        labels, n = ndi.label(prob > low)
+        if n == 0:
+            continue
+        # Foreground pixels only; np.maximum.at avoids ndi.maximum's full sort.
+        flat = labels.ravel()
+        fg = flat > 0
+        lab = flat[fg] - 1
+        size = np.bincount(lab, minlength=n).astype(np.float64)
+        tpc = np.bincount(lab, weights=fiber_flat[fg].astype(np.float64), minlength=n)
+        cmax = np.full(n, -np.inf)
+        np.maximum.at(cmax, lab, prob_flat[fg])
+        order = np.argsort(cmax, kind="stable")
+        # Suffix sums over components sorted by max: entry k = sum over components k..n-1.
+        tp_suffix = np.append(np.cumsum(tpc[order][::-1])[::-1], 0.0)
+        size_suffix = np.append(np.cumsum(size[order][::-1])[::-1], 0.0)
+        k = np.searchsorted(cmax[order], highs, side="right")
+        tp[li] = tp_suffix[k]
+        fp[li] = size_suffix[k] - tp_suffix[k]
+    return tp, fp, total - tp
 
 
 def sweep_hysteresis_thresholds(
@@ -79,26 +114,14 @@ def sweep_hysteresis_thresholds(
         img = _normalize_image(_read_gray(pair.image_path))
         prob = predict_prob(img, model, cfg, device)
         fiber = _read_gray(pair.mask_path) > 0
+        t_, f_, n_ = hysteresis_counts(prob, fiber, lows, highs)
+        tp += t_
+        fp += f_
+        fn += n_
 
-        for li, low in enumerate(lows):
-            for hi, high in enumerate(highs):
-                if not valid[li, hi]:
-                    continue
-                pred = hysteresis_threshold_mask(prob, low, high)
-                tp[li, hi] += np.sum(pred & fiber)
-                fp[li, hi] += np.sum(pred & ~fiber)
-                fn[li, hi] += np.sum(~pred & fiber)
-
-    eps = 1e-8
-    a, b = cfg.train.loss.tversky_alpha, cfg.train.loss.tversky_beta
-    raw_metrics = {
-        "dice": (2 * tp) / (2 * tp + fp + fn + eps),
-        "iou": tp / (tp + fp + fn + eps),
-        "f2": (5 * tp) / (5 * tp + 4 * fn + fp + eps),
-        "tversky": tp / (tp + a * fp + b * fn + eps),
-        "precision": tp / (tp + fp + eps),
-        "recall": tp / (tp + fn + eps),
-    }
+    raw_metrics = metrics_from_counts(
+        tp, fp, fn, cfg.train.loss.tversky_alpha, cfg.train.loss.tversky_beta
+    )
     metrics = {k: np.where(valid, v, -np.inf) for k, v in raw_metrics.items()}
     return lows, highs, metrics, valid, len(pairs)
 

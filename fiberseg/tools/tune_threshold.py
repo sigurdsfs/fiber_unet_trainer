@@ -76,6 +76,21 @@ def _counts_at(prob: np.ndarray, gt: np.ndarray, thresholds: np.ndarray):
     return tp.astype(np.float64), fp.astype(np.float64), fn.astype(np.float64)
 
 
+def metrics_from_counts(tp, fp, fn, alpha: float, beta: float) -> dict:
+    """dice/iou/f2/tversky/precision/recall from (arrays of) pooled tp/fp/fn counts."""
+    eps = 1e-8
+    return {
+        "dice": (2 * tp) / (2 * tp + fp + fn + eps),
+        "iou": tp / (tp + fp + fn + eps),
+        "f2": (5 * tp) / (5 * tp + 4 * fn + fp + eps),
+        "tversky": tp / (tp + alpha * fp + beta * fn + eps),
+        # Not offered as a --metric choice (dice/iou/f2/tversky are the tuning targets),
+        # but needed to plot/score the precision-recall curve.
+        "precision": tp / (tp + fp + eps),
+        "recall": tp / (tp + fn + eps),
+    }
+
+
 def sweep_thresholds(cfg, model, device, *, split="val", steps=99, verbose=True,
                      ridge=False):
     """Sweep `train.threshold` candidates on `split` and return (thresholds, metrics, n_images).
@@ -121,18 +136,9 @@ def sweep_thresholds(cfg, model, device, *, split="val", steps=99, verbose=True,
         fp += f_
         fn += n_
 
-    eps = 1e-8
-    a, b = cfg.train.loss.tversky_alpha, cfg.train.loss.tversky_beta
-    metrics = {
-        "dice": (2 * tp) / (2 * tp + fp + fn + eps),
-        "iou": tp / (tp + fp + fn + eps),
-        "f2": (5 * tp) / (5 * tp + 4 * fn + fp + eps),
-        "tversky": tp / (tp + a * fp + b * fn + eps),
-        # Not offered as a --metric choice (dice/iou/f2/tversky are the tuning targets),
-        # but needed to plot/score the precision-recall curve below.
-        "precision": tp / (tp + fp + eps),
-        "recall": tp / (tp + fn + eps),
-    }
+    metrics = metrics_from_counts(
+        tp, fp, fn, cfg.train.loss.tversky_alpha, cfg.train.loss.tversky_beta
+    )
     return thresholds, metrics, len(pairs)
 
 
