@@ -61,3 +61,6 @@ data/
 *.log
 logs/
 plot.png
+
+# --- SEM/EDS instrument settings (contain credentials) ---
+configs/sem_eds_local.yaml

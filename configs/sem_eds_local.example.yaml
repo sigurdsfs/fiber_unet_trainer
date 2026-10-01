@@ -1,0 +1,17 @@
+# Copy to configs/sem_eds_local.yaml (gitignored) and fill in on the instrument PC.
+# Any key of fiberseg.sem_eds.settings.SemEdsConfig may be set here; unknown keys are an error.
+
+dll_path: 'C:\Program Files\Bruker\Bruker.API.Esprit64.dll'   # TODO: actual install path
+server: "Lokaler Server"      # see: python -m fiberseg.sem_eds.bringup.step1_connect
+user: ""
+password: ""
+tcp_host: ""                  # set only if ESPRIT runs on another PC (OpenClientTCP)
+spu: 1
+
+# Hard stage box in um - REQUIRED before any stage move. Both (0, 0) = no moves allowed.
+stage_x_limits_um: [0.0, 0.0]
+stage_y_limits_um: [0.0, 0.0]
+
+seg_config: configs/example.yaml
+ckpt: ""
+training_pixel_size_um: 0.0   # 0.05 for *_pixelstd_50nm checkpoints; 0 for mixed-scale models
